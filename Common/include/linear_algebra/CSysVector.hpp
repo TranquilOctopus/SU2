@@ -104,10 +104,13 @@ inline constexpr bool su2_gpu_capable_v = false;
 #ifdef SU2_ENABLE_CUDA_KERNELS
 /*!
  * \brief Binds the calling MPI rank to one GPU (node-local rank modulo the number of visible devices).
+ * \param[in] allowCollectives - Whether all ranks are known to be calling this together, in which case
+ * MPI collectives may be used to find the node-local rank (if the launcher's environment does not
+ * give it) and to print a summary. Otherwise device 0 is the fallback.
  * \note Defined in CSysVectorGPU.cu. Idempotent (only the first call does anything), it must be called
  * by a single thread before the first CUDA allocation. Errors out if no device is visible.
  */
-void SelectCudaDeviceForRank();
+void SelectCudaDeviceForRank(bool allowCollectives);
 #endif
 
 namespace VecExpr {

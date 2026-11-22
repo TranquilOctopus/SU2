@@ -227,7 +227,7 @@ void CSysMatrix<ScalarType>::Initialize(unsigned long npoint, unsigned long npoi
   useCuda = config->GetCUDA();
 #ifdef SU2_ENABLE_CUDA_KERNELS
   /*--- Bind this rank to its GPU before any device allocation (once, idempotent). ---*/
-  if (useCuda) SelectCudaDeviceForRank();
+  if (useCuda) SelectCudaDeviceForRank(false);
 #endif
 
   const bool ilu_needed = (prec == ILU);

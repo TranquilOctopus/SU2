@@ -54,7 +54,7 @@ void CSysVector<ScalarType>::Initialize(unsigned long numBlk, unsigned long numB
 
 #ifdef SU2_ENABLE_CUDA_KERNELS
   /*--- First CUDA allocation of the run, bind this rank to its GPU (once). ---*/
-  SelectCudaDeviceForRank();
+  SelectCudaDeviceForRank(false);
 #endif
 
   /*--- Device storage mirrors the host allocation; free first so that re-initializing a

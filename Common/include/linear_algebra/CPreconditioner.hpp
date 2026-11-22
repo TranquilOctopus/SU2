@@ -40,7 +40,7 @@
 /*!
  * \brief Applies a preconditioner that only has a host implementation to vectors that live
  * on the device: bring the input down, apply, put the result back.
- * \note This is what keeps LU-SGS, Linelet and PaStiX usable on the GPU path. The
+ * \note This is what keeps Linelet and PaStiX usable on the GPU path (LU-SGS and ILU have device versions). The
  * transfers are issued by one thread with the team synchronized around them, the apply
  * itself is the normal OpenMP parallel host code.
  */

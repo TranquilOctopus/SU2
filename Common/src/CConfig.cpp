@@ -30,6 +30,7 @@
 #include <limits>
 
 #include "../include/CConfig.hpp"
+#include "../include/linear_algebra/CSysVector.hpp"
 #undef ENABLE_MAPS
 
 #include "../include/fem/fem_gauss_jacobi_quadrature.hpp"
@@ -3706,6 +3707,13 @@ void CConfig::SetPostprocessing(SU2_COMPONENT val_software, unsigned short val_i
   if (nZone > 1){
     Multizone_Problem = YES;
   }
+
+#ifdef SU2_ENABLE_CUDA_KERNELS
+  /*--- Every rank gets here together, so bind it to a GPU now, before any device allocation. No-op
+   * after the first call. Without ENABLE_CUDA, tools that never touch the device must not require one;
+   * CSysVector still binds (without collectives) when it first allocates device storage. ---*/
+  if (Enable_Cuda) SelectCudaDeviceForRank(true);
+#endif
 
   /*--- nvcc cannot compile the CoDiPack types, so the kernels are only built into the primal
    * solver (see SU2_ENABLE_CUDA_KERNELS). Catch it here, not minutes into the run. ---*/
