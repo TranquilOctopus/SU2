@@ -578,9 +578,6 @@ template <class ScalarType>
 void CSysMatrix<ScalarType>::ComputeJacobiPreconditionerGPU(const CSysVector<ScalarType>& vec,
                                                             CSysVector<ScalarType>& prod, CGeometry* geometry,
                                                             const CConfig* config) const {
-  (void)geometry;
-  (void)config;
-
   SU2_ZONE_SCOPED
 
   if (d_invM == nullptr) {
@@ -596,6 +593,10 @@ void CSysMatrix<ScalarType>::ComputeJacobiPreconditionerGPU(const CSysVector<Sca
   /*--- Sync so the zone above actually times the kernel, not just the (async) launch call. ---*/
   gpuErrChk(cudaStreamSynchronize(nullptr));
   gpuErrChk(cudaGetLastError());
+
+  /*--- MPI Parallelization, device-side halo exchange (no-op without neighbours). ---*/
+  CSysMatrixComms::InitiateGPU(prod, geometry, config);
+  CSysMatrixComms::CompleteGPU(prod, geometry, config);
 }
 
 template <class ScalarType>
@@ -711,7 +712,8 @@ void CSysMatrix<ScalarType>::BuildILUPreconditionerGPU() {
 
 template <class ScalarType>
 void CSysMatrix<ScalarType>::ComputeILUPreconditionerGPU(const CSysVector<ScalarType>& vec,
-                                                         CSysVector<ScalarType>& prod) const {
+                                                         CSysVector<ScalarType>& prod, CGeometry* geometry,
+                                                         const CConfig* config) const {
   SU2_ZONE_SCOPED
 
   if (gpu_ilu.d == nullptr) {
@@ -780,6 +782,10 @@ void CSysMatrix<ScalarType>::ComputeILUPreconditionerGPU(const CSysVector<Scalar
   gpuErrChk(cudaGraphLaunch(precond_fwd_graph_exec, aux_stream));
   gpuErrChk(cudaStreamSynchronize(aux_stream));
   gpuErrChk(cudaGetLastError());
+
+  /*--- MPI Parallelization, the work on aux_stream is complete (synchronized above). ---*/
+  CSysMatrixComms::InitiateGPU(prod, geometry, config);
+  CSysMatrixComms::CompleteGPU(prod, geometry, config);
 }
 
 /*!
@@ -886,7 +892,8 @@ void CSysMatrix<ScalarType>::BuildLU_SGSPreconditionerGPU() {
  */
 template <class ScalarType>
 void CSysMatrix<ScalarType>::ComputeLU_SGSForwardGPU(const CSysVector<ScalarType>& vec,
-                                                     CSysVector<ScalarType>& prod) const {
+                                                     CSysVector<ScalarType>& prod, CGeometry* geometry,
+                                                     const CConfig* config) const {
   SU2_ZONE_SCOPED
 
   if (d_invM == nullptr) {
@@ -947,13 +954,17 @@ void CSysMatrix<ScalarType>::ComputeLU_SGSForwardGPU(const CSysVector<ScalarType
   gpuErrChk(cudaStreamSynchronize(aux_stream));
   gpuErrChk(cudaGetLastError());
 
+  /*--- MPI Parallelization, as in the host version the halo exchange follows the forward sweep. ---*/
+  CSysMatrixComms::InitiateGPU(prod, geometry, config);
+  CSysMatrixComms::CompleteGPU(prod, geometry, config);
 }
 
 /*!
  * \brief Compute the LU-SGS preconditioner forward pass
  */
 template <class ScalarType>
-void CSysMatrix<ScalarType>::ComputeLU_SGSBackwardGPU(CSysVector<ScalarType>& prod) const {
+void CSysMatrix<ScalarType>::ComputeLU_SGSBackwardGPU(CSysVector<ScalarType>& prod, CGeometry* geometry,
+                                                      const CConfig* config) const {
   SU2_ZONE_SCOPED
 
   if (d_invM == nullptr) {
@@ -1010,6 +1021,9 @@ void CSysMatrix<ScalarType>::ComputeLU_SGSBackwardGPU(CSysVector<ScalarType>& pr
   gpuErrChk(cudaStreamSynchronize(aux_stream));
   gpuErrChk(cudaGetLastError());
 
+  /*--- MPI Parallelization, as in the host version the halo exchange follows the backward sweep. ---*/
+  CSysMatrixComms::InitiateGPU(prod, geometry, config);
+  CSysMatrixComms::CompleteGPU(prod, geometry, config);
 }
 
 template <class ScalarType>
@@ -1071,6 +1085,10 @@ void CSysMatrix<ScalarType>::MatrixVectorProductGPU(const CSysVector<ScalarType>
   /*--- Sync so the zone above actually times the kernel, not just the (async) launch call. ---*/
   gpuErrChk(cudaStreamSynchronize(nullptr));
   gpuErrChk(cudaGetLastError());
+
+  /*--- MPI Parallelization, device-side halo exchange (no-op without neighbours). ---*/
+  CSysMatrixComms::InitiateGPU(prod, geometry, config);
+  CSysMatrixComms::CompleteGPU(prod, geometry, config);
 }
 
 #define INSTANTIATE_MATRIX(TYPE)                                                            \
@@ -1084,14 +1102,20 @@ template void CSysMatrix<TYPE>::BuildJacobiPreconditionerGPU();                 
 template void CSysMatrix<TYPE>::BuildILUPreconditionerGPU();                                \
 template void CSysMatrix<TYPE>::BuildLU_SGSPreconditionerGPU();                             \
 template void CSysMatrix<TYPE>::ComputeILUPreconditionerGPU(const CSysVector<TYPE>& vec,    \
-                                                            CSysVector<TYPE>& prod) const;  \
+                                                            CSysVector<TYPE>& prod,         \
+                                                            CGeometry* geometry,            \
+                                                            const CConfig* config) const;   \
 template void CSysMatrix<TYPE>::ComputeJacobiPreconditionerGPU(const CSysVector<TYPE>& vec, \
                                                                CSysVector<TYPE>& prod,      \
                                                                CGeometry* geometry,         \
                                                                const CConfig* config) const;\
 template void CSysMatrix<TYPE>::ComputeLU_SGSForwardGPU(const CSysVector<TYPE>& vec,        \
-                                                        CSysVector<TYPE>& prod) const;      \
-template void CSysMatrix<TYPE>::ComputeLU_SGSBackwardGPU(CSysVector<TYPE>& prod) const;
+                                                        CSysVector<TYPE>& prod,             \
+                                                        CGeometry* geometry,                \
+                                                        const CConfig* config) const;       \
+template void CSysMatrix<TYPE>::ComputeLU_SGSBackwardGPU(CSysVector<TYPE>& prod,            \
+                                                         CGeometry* geometry,               \
+                                                         const CConfig* config) const;
 INSTANTIATE_MATRIX(su2mixedfloat)
 
 #if defined(USE_MIXED_PRECISION) && !defined(USE_SINGLE_PRECISION)

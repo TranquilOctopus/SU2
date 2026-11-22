@@ -12,6 +12,7 @@ option('mkl_root', type : 'string', value : '/opt/intel/mkl', description: 'root
 option('enable-openblas', type : 'boolean', value : false, description: 'enable BLAS and LAPACK support via OpenBLAS')
 option('enable-cuda', type : 'boolean', value : false, description: 'enable GPU acceleration using CUDA')
 option('cuda-arch', type : 'string', value : 'auto', description: 'CUDA compute capability to generate code for, "auto" detects the GPU in this machine, otherwise passed to nvcc verbatim (e.g. sm_89, native, all-major)')
+option('cuda-aware-mpi', type : 'boolean', value : false, description: 'pass GPU device pointers directly to MPI in the GPU halo exchange (requires a CUDA-aware MPI library, enable-cuda and MPI); otherwise the data is staged through host buffers')
 option('blas-name', type : 'string', value : 'openblas', description: 'name of the BLAS/LAPACK dependency')
 option('enable-pastix', type : 'boolean', value : false, description: 'enable PaStiX support')
 option('custom-mpi',  type : 'boolean', value : false, description: 'enable MPI assuming the compiler and/or env vars give the correct include dirs and linker args.')

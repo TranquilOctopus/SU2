@@ -101,6 +101,15 @@ inline constexpr bool su2_gpu_capable_v = false;
 #define BEGIN_SU2_DEVICE_REGION BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS
 #define END_SU2_DEVICE_REGION END_SU2_OMP_SAFE_GLOBAL_ACCESS
 
+#ifdef SU2_ENABLE_CUDA_KERNELS
+/*!
+ * \brief Binds the calling MPI rank to one GPU (node-local rank modulo the number of visible devices).
+ * \note Defined in CSysVectorGPU.cu. Idempotent (only the first call does anything), it must be called
+ * by a single thread before the first CUDA allocation. Errors out if no device is visible.
+ */
+void SelectCudaDeviceForRank();
+#endif
+
 namespace VecExpr {
 
 enum class DeviceAssignOp { Assign, Add, Subtract, Multiply, Divide };

@@ -267,8 +267,15 @@ if get_option('enable-pastix')
 endif
 
 # CUDA dependencies
+if get_option('cuda-aware-mpi') and not get_option('enable-cuda')
+  error('cuda-aware-mpi requires enable-cuda=true.')
+endif
 if get_option('enable-cuda')
   su2_cpp_args += '-DHAVE_CUDA'
+  if get_option('cuda-aware-mpi')
+    assert(mpi, 'cuda-aware-mpi requires MPI support.')
+    su2_cpp_args += '-DHAVE_CUDA_AWARE_MPI'
+  endif
   su2_deps += meson.get_compiler('cuda').find_library('cudart', required : true)
 endif
 

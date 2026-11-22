@@ -31,6 +31,8 @@
 #include "../../include/linear_algebra/CSysVector.hpp"
 #include "../../include/linear_algebra/GPUComms.cuh"
 #include <algorithm>
+#include <iostream>
+#include <string>
 #include <vector>
 
 namespace {
@@ -188,6 +190,51 @@ bool UseDeviceExpressions() { return use_device_expressions; }
 void SetUseDeviceExpressions(bool use) { use_device_expressions = use; }
 
 }  // namespace VecExpr
+
+void SelectCudaDeviceForRank() {
+  /*--- Ranks of the same node are numbered consecutively in a node-local communicator and each
+   * one takes the matching device, modulo the number of visible devices (CUDA_VISIBLE_DEVICES is
+   * thus respected). Done once, before any CUDA allocation, and the CUDA context of the calling
+   * thread is the one that is used by the device regions, which are single threaded. ---*/
+  static bool done = false;
+  if (done) return;
+  done = true;
+
+  int deviceCount = 0;
+  const auto err = cudaGetDeviceCount(&deviceCount);
+  if (err != cudaSuccess || deviceCount == 0) {
+    SU2_MPI::Error(std::string("ENABLE_CUDA= YES (or a CUDA build) but no CUDA device is visible to this rank (") +
+                       cudaGetErrorString(err) + "). Check CUDA_VISIBLE_DEVICES and the job's GPU allocation.",
+                   CURRENT_FUNCTION);
+  }
+
+  int localRank = 0, localSize = 1, worldSize = 1, worldRank = 0;
+#ifdef HAVE_MPI
+  MPI_Comm localComm;
+  MPI_Comm_split_type(SU2_MPI::GetComm(), MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, &localComm);
+  MPI_Comm_rank(localComm, &localRank);
+  MPI_Comm_size(localComm, &localSize);
+  MPI_Comm_free(&localComm);
+  MPI_Comm_rank(SU2_MPI::GetComm(), &worldRank);
+  MPI_Comm_size(SU2_MPI::GetComm(), &worldSize);
+#endif
+
+  const int device = localRank % deviceCount;
+  gpuErrChk(cudaSetDevice(device));
+
+  /*--- Report the worst case over the ranks (all nodes are normally identical). ---*/
+  int maxLocalSize = localSize, minDevices = deviceCount;
+#ifdef HAVE_MPI
+  MPI_Allreduce(&localSize, &maxLocalSize, 1, MPI_INT, MPI_MAX, SU2_MPI::GetComm());
+  MPI_Allreduce(&deviceCount, &minDevices, 1, MPI_INT, MPI_MIN, SU2_MPI::GetComm());
+#endif
+  if (worldRank == 0) {
+    std::cout << "CUDA: " << worldSize << " rank(s), up to " << maxLocalSize << " per node, at least " << minDevices
+              << " GPU(s) visible per node; each rank uses GPU (local rank % #GPUs).";
+    if (maxLocalSize > minDevices) std::cout << " WARNING: GPUs are shared by several ranks.";
+    std::cout << std::endl;
+  }
+}
 
 template <class ScalarType>
 void CSysVector<ScalarType>::HtDTransfer(bool trigger) const {

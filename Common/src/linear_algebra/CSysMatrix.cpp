@@ -29,11 +29,17 @@
 
 #include "../../include/geometry/CGeometry.hpp"
 #include "../../include/linear_algebra/CMatrixInverse.hpp"
+#ifdef SU2_ENABLE_CUDA_KERNELS
+#include "../../include/linear_algebra/CSysMatrixCommsGPU.hpp"
+#endif
 #include "../../include/toolboxes/allocation_toolbox.hpp"
 
 #include <cmath>
+#include <algorithm>
 #include <limits>
+#include <memory>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -219,6 +225,10 @@ void CSysMatrix<ScalarType>::Initialize(unsigned long npoint, unsigned long npoi
   }
 
   useCuda = config->GetCUDA();
+#ifdef SU2_ENABLE_CUDA_KERNELS
+  /*--- Bind this rank to its GPU before any device allocation (once, idempotent). ---*/
+  if (useCuda) SelectCudaDeviceForRank();
+#endif
 
   const bool ilu_needed = (prec == ILU);
   const bool diag_needed = (prec == JACOBI) || (prec == Q_JACOBI) || (prec == LINELET);
@@ -1211,7 +1221,7 @@ void CSysMatrix<ScalarType>::ComputeILUPreconditioner(const CSysVector<ScalarTyp
   if (useCuda) {
 #ifdef SU2_ENABLE_CUDA_KERNELS
     if constexpr (su2_gpu_capable_v<ScalarType>) {
-      SU2_DEVICE_REGION(ComputeILUPreconditionerGPU(vec, prod);)
+      SU2_DEVICE_REGION(ComputeILUPreconditionerGPU(vec, prod, geometry, config);)
       return;
     } else {
       GPUNotAvailable(CURRENT_FUNCTION);
@@ -1326,6 +1336,23 @@ void CSysMatrix<ScalarType>::ComputeLU_SGSPreconditioner(const CSysVector<Scalar
                                                          const CConfig* config) const {
   SU2_ZONE_SCOPED
 
+  if (useCuda) {
+#ifdef SU2_ENABLE_CUDA_KERNELS
+    if constexpr (su2_gpu_capable_v<ScalarType>) {
+      /*--- Same sequence as below, but every sweep ends with the device halo exchange of prod. ---*/
+      BEGIN_SU2_DEVICE_REGION
+      ComputeLU_SGSForwardGPU(vec, prod, geometry, config);
+      ComputeLU_SGSBackwardGPU(prod, geometry, config);
+      END_SU2_DEVICE_REGION
+      return;
+    } else {
+      GPUNotAvailable(CURRENT_FUNCTION);
+    }
+#else
+    GPUNotAvailable(CURRENT_FUNCTION);
+#endif
+  }
+
   /*--- First part of the symmetric iteration: (D+L).x* = b ---*/
   ComputeLU_SGSPreconditionerForward(vec, prod);
 
@@ -1348,18 +1375,8 @@ void CSysMatrix<ScalarType>::ComputeLU_SGSPreconditionerForward(const CSysVector
                                                                 CSysVector<ScalarType>& prod) const {
   SU2_ZONE_SCOPED
 
-  if (useCuda) {
-#ifdef SU2_ENABLE_CUDA_KERNELS
-    if constexpr (su2_gpu_capable_v<ScalarType>) {
-      SU2_DEVICE_REGION(ComputeLU_SGSForwardGPU(vec, prod);)
-      return;
-    } else {
-      GPUNotAvailable(CURRENT_FUNCTION);
-    }
-#else
-    GPUNotAvailable(CURRENT_FUNCTION);
-#endif
-  }
+  /*--- The device version (with its halo exchange) is dispatched by ComputeLU_SGSPreconditioner. ---*/
+  assert(!useCuda);
 
   /*--- First part of the symmetric iteration: (D+L).x* = b ---*/
 
@@ -1405,18 +1422,8 @@ void CSysMatrix<ScalarType>::ComputeLU_SGSPreconditionerBackward(CSysVector<Scal
 
   /*--- Second part of the symmetric iteration: (D+U).x_(1) = D.x* ---*/
 
-  if (useCuda) {
-#ifdef SU2_ENABLE_CUDA_KERNELS
-    if constexpr (su2_gpu_capable_v<ScalarType>) {
-      SU2_DEVICE_REGION(ComputeLU_SGSBackwardGPU(prod);)
-      return;
-    } else {
-      GPUNotAvailable(CURRENT_FUNCTION);
-    }
-#else
-    GPUNotAvailable(CURRENT_FUNCTION);
-#endif
-  }
+  /*--- The device version (with its halo exchange) is dispatched by ComputeLU_SGSPreconditioner. ---*/
+  assert(!useCuda);
 
   /*--- OpenMP Parallelization ---*/
   SU2_OMP_FOR_STAT(1)
@@ -1842,6 +1849,230 @@ void CSysMatrix<ScalarType>::ComputePastixPreconditioner(const CSysVector<Scalar
 #endif
 }
 
+#ifdef SU2_ENABLE_CUDA_KERNELS
+
+namespace {
+
+/*!
+ * \brief Device-side state for the halo exchange of one geometry (grid level): the index lists uploaded once and
+ *        the pack/unpack buffers (and, with CUDA-aware MPI, the MPI requests) for scalar type T.
+ *        Rebuilt if the geometry changes (compared by the host index arrays), buffers grow on demand.
+ */
+template <class T>
+struct DeviceHaloState {
+  using Request = typename SelectMPIWrapper<T>::W::Request;
+
+  const unsigned long* hostSendIdx{nullptr};
+  const unsigned long* hostRecvIdx{nullptr};
+  size_t nSend{0}, nRecv{0};
+  unsigned long* sendIdx{nullptr};  /*!< \brief Device copy of Local_Point_P2PSend. */
+  unsigned long* recvIdx{nullptr};  /*!< \brief Device copy of Local_Point_P2PRecv. */
+  T* packBuf{nullptr};              /*!< \brief Device buffer where the data to send is packed. */
+  T* unpackBuf{nullptr};            /*!< \brief Device buffer where the received data lands. */
+  size_t capacity{0};               /*!< \brief Size of the buffers in number of entries of T. */
+  std::vector<Request> reqSend, reqRecv; /*!< \brief Requests, used only with CUDA-aware MPI. */
+
+  DeviceHaloState() = default;
+  DeviceHaloState(const DeviceHaloState&) = delete;
+  DeviceHaloState& operator=(const DeviceHaloState&) = delete;
+  ~DeviceHaloState() { Release(); }
+
+  void ReleaseIndices() {
+    CSysMatrixCommsGPU::Free(sendIdx);
+    CSysMatrixCommsGPU::Free(recvIdx);
+    sendIdx = recvIdx = nullptr;
+  }
+  void ReleaseBuffers() {
+    CSysMatrixCommsGPU::Free(packBuf);
+    CSysMatrixCommsGPU::Free(unpackBuf);
+    packBuf = unpackBuf = nullptr;
+    capacity = 0;
+  }
+  void Release() {
+    ReleaseIndices();
+    ReleaseBuffers();
+  }
+
+  /*--- Make sure the state is valid for this geometry and nVar. ---*/
+  void Prepare(const CGeometry* geometry, size_t nVar) {
+    const size_t newSend = geometry->nPoint_P2PSend[geometry->nP2PSend];
+    const size_t newRecv = geometry->nPoint_P2PRecv[geometry->nP2PRecv];
+
+    /*--- Upload the index lists once, and again if the geometry (or the address it lives at) changed. ---*/
+    if (!sendIdx || hostSendIdx != geometry->Local_Point_P2PSend || hostRecvIdx != geometry->Local_Point_P2PRecv ||
+        nSend != newSend || nRecv != newRecv) {
+      ReleaseIndices();
+      nSend = newSend;
+      nRecv = newRecv;
+      hostSendIdx = geometry->Local_Point_P2PSend;
+      hostRecvIdx = geometry->Local_Point_P2PRecv;
+      sendIdx =
+          static_cast<unsigned long*>(CSysMatrixCommsGPU::Malloc(std::max<size_t>(nSend, 1) * sizeof(unsigned long)));
+      recvIdx =
+          static_cast<unsigned long*>(CSysMatrixCommsGPU::Malloc(std::max<size_t>(nRecv, 1) * sizeof(unsigned long)));
+      if (nSend) CSysMatrixCommsGPU::CopyToDevice(sendIdx, hostSendIdx, nSend * sizeof(unsigned long));
+      if (nRecv) CSysMatrixCommsGPU::CopyToDevice(recvIdx, hostRecvIdx, nRecv * sizeof(unsigned long));
+    }
+
+    /*--- Buffers are used for both directions, so size them for the largest. ---*/
+    const size_t needed = std::max(nSend, nRecv) * nVar;
+    if (needed > capacity) {
+      ReleaseBuffers();
+      packBuf = static_cast<T*>(CSysMatrixCommsGPU::Malloc(needed * sizeof(T)));
+      unpackBuf = static_cast<T*>(CSysMatrixCommsGPU::Malloc(needed * sizeof(T)));
+      capacity = needed;
+    }
+
+    reqSend.resize(geometry->nP2PSend);
+    reqRecv.resize(geometry->nP2PRecv);
+  }
+};
+
+/*--- One state per geometry. Only the thread executing the (master-only) device region touches this. ---*/
+template <class T>
+DeviceHaloState<T>& GetDeviceHaloState(const CGeometry* geometry) {
+  static std::unordered_map<const CGeometry*, std::unique_ptr<DeviceHaloState<T>>> states;
+  auto& ptr = states[geometry];
+  if (!ptr) ptr = std::make_unique<DeviceHaloState<T>>();
+  return *ptr;
+}
+
+}  // namespace
+
+template <class T>
+void CSysMatrixComms::InitiateGPU(const CSysVector<T>& x, CGeometry* geometry, const CConfig* config,
+                                  MPI_QUANTITIES commType) {
+  if (geometry->nP2PSend == 0) return;
+
+  const size_t nVar = x.GetNVar();
+  [[maybe_unused]] const auto MPI_TYPE = geometry->GetCommType<T>();
+  const bool reverse = (commType == MPI_QUANTITIES::SOLUTION_MATRIXTRANS);
+
+  switch (commType) {
+    case MPI_QUANTITIES::SOLUTION_MATRIX:
+    case MPI_QUANTITIES::SOLUTION_MATRIXTRANS:
+      break;
+    default:
+      SU2_MPI::Error("Unrecognized quantity for point-to-point MPI comms.", CURRENT_FUNCTION);
+      break;
+  }
+
+  auto& state = GetDeviceHaloState<T>(geometry);
+  state.Prepare(geometry, nVar);
+
+  /*--- As in the host version, in reverse mode everything is derived from the recv structures. ---*/
+  const auto* nPoint = reverse ? geometry->nPoint_P2PRecv : geometry->nPoint_P2PSend;
+  const auto nPack = static_cast<size_t>(nPoint[geometry->nP2PSend]);
+  const auto* packIdx = reverse ? state.recvIdx : state.sendIdx;
+
+#if defined(HAVE_CUDA_AWARE_MPI) && defined(HAVE_MPI)
+  /*--- CUDA-aware MPI: the device buffers are handed to MPI directly. ---*/
+
+  CSysMatrixCommsGPU::Pack(x.GetDevicePointer(), packIdx, state.packBuf, nPack, nVar);
+
+  /*--- The pack kernel must be done before MPI reads the buffer. This also guarantees that any unpack kernel of a
+   previous exchange, which reads unpackBuf, is done before MPI writes to it again. ---*/
+  CSysMatrixCommsGPU::Synchronize();
+
+  /*--- Same neighbors, counts and tags as CGeometry::PostP2PRecvs and PostP2PSends. ---*/
+  const auto mpiType = (sizeof(T) == sizeof(float)) ? MPI_FLOAT : MPI_DOUBLE;
+  using W = typename SelectMPIWrapper<T>::W;
+
+  for (int iRecv = 0; iRecv < geometry->nP2PRecv; iRecv++) {
+    const auto* nPointRecv = reverse ? geometry->nPoint_P2PSend : geometry->nPoint_P2PRecv;
+    const auto source = reverse ? geometry->Neighbors_P2PSend[iRecv] : geometry->Neighbors_P2PRecv[iRecv];
+    const auto offset = nVar * nPointRecv[iRecv];
+    const auto count = nVar * (nPointRecv[iRecv + 1] - nPointRecv[iRecv]);
+    W::Irecv(state.unpackBuf + offset, count, mpiType, source, source + 1, SU2_MPI::GetComm(), &state.reqRecv[iRecv]);
+  }
+
+  for (int iSend = 0; iSend < geometry->nP2PSend; iSend++) {
+    const auto dest = reverse ? geometry->Neighbors_P2PRecv[iSend] : geometry->Neighbors_P2PSend[iSend];
+    const auto offset = nVar * nPoint[iSend];
+    const auto count = nVar * (nPoint[iSend + 1] - nPoint[iSend]);
+    W::Isend(state.packBuf + offset, count, mpiType, dest, SU2_MPI::GetRank() + 1, SU2_MPI::GetComm(),
+             &state.reqSend[iSend]);
+  }
+#else
+  /*--- Staged mode: device -> host buffer of the geometry -> regular MPI. The host buffers are reallocated by
+   AllocateP2PComms whenever nVar grows, which would invalidate a cudaHostRegister, so they are left pageable. ---*/
+
+  geometry->AllocateP2PComms(nVar);
+
+  geometry->PostP2PRecvs(geometry, config, MPI_TYPE, nVar, reverse);
+
+  CSysMatrixCommsGPU::Pack(x.GetDevicePointer(), packIdx, state.packBuf, nPack, nVar);
+
+  /*--- One blocking transfer for all messages, same layout as the host buffer. ---*/
+  auto* hostBuf = reverse ? geometry->GetP2PRecvBuf<T>() : geometry->GetP2PSendBuf<T>();
+  CSysMatrixCommsGPU::CopyToHost(hostBuf, state.packBuf, nPack * nVar * sizeof(T));
+
+  for (int iMessage = 0; iMessage < geometry->nP2PSend; iMessage++) {
+    geometry->PostP2PSends(geometry, config, MPI_TYPE, nVar, iMessage, reverse);
+  }
+#endif
+}
+
+template <class T>
+void CSysMatrixComms::CompleteGPU(CSysVector<T>& x, CGeometry* geometry, const CConfig* config,
+                                  MPI_QUANTITIES commType) {
+  if (geometry->nP2PRecv == 0) return;
+
+  const size_t nVar = x.GetNVar();
+  const bool reverse = (commType == MPI_QUANTITIES::SOLUTION_MATRIXTRANS);
+
+  switch (commType) {
+    case MPI_QUANTITIES::SOLUTION_MATRIX:
+    case MPI_QUANTITIES::SOLUTION_MATRIXTRANS:
+      break;
+    default:
+      SU2_MPI::Error("Unrecognized quantity for point-to-point MPI comms.", CURRENT_FUNCTION);
+      break;
+  }
+
+  auto& state = GetDeviceHaloState<T>(geometry);
+
+  /*--- In reverse mode the received data goes to the "send" points and is accumulated. The accumulation is done
+   message by message (kernels serialized on the stream), a point can be in more than one message. ---*/
+  const auto* nPoint = reverse ? geometry->nPoint_P2PSend : geometry->nPoint_P2PRecv;
+  const auto* idx = reverse ? state.sendIdx : state.recvIdx;
+
+  typename SelectMPIWrapper<T>::W::Status status;
+  int ind;
+
+  for (int iMessage = 0; iMessage < geometry->nP2PRecv; iMessage++) {
+    /*--- Receive the messages in the order they arrive. ind is the index in the structure used to post the recvs
+     (the send structure in reverse mode), the host version finds the same via the source rank. ---*/
+#if defined(HAVE_CUDA_AWARE_MPI) && defined(HAVE_MPI)
+    SelectMPIWrapper<T>::W::Waitany(geometry->nP2PRecv, state.reqRecv.data(), &ind, &status);
+#else
+    SelectMPIWrapper<T>::W::Waitany(geometry->nP2PRecv, geometry->GetP2PRecvReq<T>(), &ind, &status);
+
+    /*--- Move this message to the device, it lands at the same offset as in the host buffer. ---*/
+    const auto* hostBuf = reverse ? geometry->GetP2PSendBuf<T>() : geometry->GetP2PRecvBuf<T>();
+    CSysMatrixCommsGPU::CopyToDevice(state.unpackBuf + size_t(nPoint[ind]) * nVar,
+                                     hostBuf + size_t(nPoint[ind]) * nVar,
+                                     size_t(nPoint[ind + 1] - nPoint[ind]) * nVar * sizeof(T));
+#endif
+
+    const size_t offset = nPoint[ind];
+    const size_t nRecv = nPoint[ind + 1] - nPoint[ind];
+    CSysMatrixCommsGPU::Unpack(x.GetDevicePointer(), idx + offset, state.unpackBuf + offset * nVar, nRecv, nVar,
+                               reverse);
+  }
+
+  /*--- Verify that all non-blocking sends have finished, they read the host send buffer or the pack buffer. ---*/
+#ifdef HAVE_MPI
+#if defined(HAVE_CUDA_AWARE_MPI)
+  SelectMPIWrapper<T>::W::Waitall(geometry->nP2PSend, state.reqSend.data(), MPI_STATUSES_IGNORE);
+#else
+  SelectMPIWrapper<T>::W::Waitall(geometry->nP2PSend, geometry->GetP2PSendReq<T>(), MPI_STATUSES_IGNORE);
+#endif
+#endif
+}
+
+#endif  // SU2_ENABLE_CUDA_KERNELS
+
 /*--- Explicit instantiations ---*/
 
 #define INSTANTIATE_COMMS(TYPE)                                                                                       \
@@ -1861,4 +2092,17 @@ INSTANTIATE_MATRIX(passivedouble)
 #endif
 #ifdef CODI_REVERSE_TYPE
 INSTANTIATE_COMMS(su2double)
+#endif
+
+#ifdef SU2_ENABLE_CUDA_KERNELS
+#define INSTANTIATE_COMMS_GPU(TYPE)                                                                    \
+  template void CSysMatrixComms::InitiateGPU<TYPE>(const CSysVector<TYPE>&, CGeometry*, const CConfig*, \
+                                                   MPI_QUANTITIES);                                    \
+  template void CSysMatrixComms::CompleteGPU<TYPE>(CSysVector<TYPE>&, CGeometry*, const CConfig*, MPI_QUANTITIES);
+
+INSTANTIATE_COMMS_GPU(su2mixedfloat)
+#if defined(USE_MIXED_PRECISION) && !defined(USE_SINGLE_PRECISION)
+INSTANTIATE_COMMS_GPU(passivedouble)
+#endif
+#undef INSTANTIATE_COMMS_GPU
 #endif

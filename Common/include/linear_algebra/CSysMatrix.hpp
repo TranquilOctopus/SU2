@@ -109,6 +109,36 @@ struct CSysMatrixComms {
   template <class T>
   static void Complete(CSysVector<T>& x, CGeometry* geometry, const CConfig* config,
                        MPI_QUANTITIES commType = MPI_QUANTITIES::SOLUTION_MATRIX);
+
+#ifdef SU2_ENABLE_CUDA_KERNELS
+  /*!
+   * \brief Device version of Initiate(): packs the halo data from the DEVICE storage of x (the host copy is not
+   *        touched) and launches the MPI communication, either staged through the host buffers of the geometry or,
+   *        if compiled with HAVE_CUDA_AWARE_MPI, directly from device memory.
+   * \note Must be called by a single thread from within a SU2_DEVICE_REGION (no OpenMP worksharing or barriers
+   *       are used). Returns immediately if the geometry has no point-to-point communications.
+   * \param[in] x        - CSysVector holding the array of data (device storage is used).
+   * \param[in] geometry - Geometrical definition of the problem.
+   * \param[in] config   - Definition of the particular problem.
+   * \param[in] commType - Enumerated type for the quantity to be communicated.
+   */
+  template <class T>
+  static void InitiateGPU(const CSysVector<T>& x, CGeometry* geometry, const CConfig* config,
+                          MPI_QUANTITIES commType = MPI_QUANTITIES::SOLUTION_MATRIX);
+
+  /*!
+   * \brief Device version of Complete(): waits for the communications launched by InitiateGPU() and unpacks the
+   *        received data into the DEVICE storage of x (assigning, or adding for SOLUTION_MATRIXTRANS).
+   * \note Same threading contract as InitiateGPU().
+   * \param[in] x        - CSysVector holding the array of data (device storage is used).
+   * \param[in] geometry - Geometrical definition of the problem.
+   * \param[in] config   - Definition of the particular problem.
+   * \param[in] commType - Enumerated type for the quantity to be unpacked.
+   */
+  template <class T>
+  static void CompleteGPU(CSysVector<T>& x, CGeometry* geometry, const CConfig* config,
+                          MPI_QUANTITIES commType = MPI_QUANTITIES::SOLUTION_MATRIX);
+#endif
 };
 
 /*!
@@ -675,7 +705,8 @@ class CSysMatrix {
   /*!
    * \brief Apply the ILU preconditioner on the device.
    */
-  void ComputeILUPreconditionerGPU(const CSysVector<ScalarType>& vec, CSysVector<ScalarType>& prod) const;
+  void ComputeILUPreconditionerGPU(const CSysVector<ScalarType>& vec, CSysVector<ScalarType>& prod,
+                                   CGeometry* geometry, const CConfig* config) const;
 
   /*!
    * \brief Build the LU-SGS preconditioner on the device
@@ -683,14 +714,15 @@ class CSysMatrix {
   void BuildLU_SGSPreconditionerGPU();
 
   /*!
-   * \brief Apply the LU-SGS preconditioner forward pass on the device
+   * \brief Apply the LU-SGS preconditioner forward pass on the device, followed by the device halo exchange.
    */
-  void ComputeLU_SGSForwardGPU(const CSysVector<ScalarType>& vec, CSysVector<ScalarType>& prod) const;
+  void ComputeLU_SGSForwardGPU(const CSysVector<ScalarType>& vec, CSysVector<ScalarType>& prod, CGeometry* geometry,
+                               const CConfig* config) const;
 
   /*!
-   * \brief Apply the LU-SGS preconditioner backward pass on the device
+   * \brief Apply the LU-SGS preconditioner backward pass on the device, followed by the device halo exchange.
    */
-  void ComputeLU_SGSBackwardGPU(CSysVector<ScalarType>& prod) const;
+  void ComputeLU_SGSBackwardGPU(CSysVector<ScalarType>& prod, CGeometry* geometry, const CConfig* config) const;
 
   /*!
    * \brief Apply the forward pass of the LU-SGS preconditioner

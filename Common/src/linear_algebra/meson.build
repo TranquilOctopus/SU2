@@ -8,5 +8,5 @@ common_src += files(['CSysSolve_b.cpp',
 if get_option('enable-cuda')
   # Kept apart from common_src because nvcc takes a different set of flags, see
   # common_cuda_src in Common/src/meson.build.
-  common_cuda_src += files(['CSysMatrixGPU.cu', 'CSysVectorGPU.cu'])
+  common_cuda_src += files(['CSysMatrixGPU.cu', 'CSysMatrixCommsGPU.cu', 'CSysVectorGPU.cu'])
 endif

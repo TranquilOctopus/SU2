@@ -52,6 +52,11 @@ void CSysVector<ScalarType>::Initialize(unsigned long numBlk, unsigned long numB
 
   if (vec_val == nullptr) vec_val = MemoryAllocation::aligned_alloc<ScalarType, true>(64, nElm * sizeof(ScalarType));
 
+#ifdef SU2_ENABLE_CUDA_KERNELS
+  /*--- First CUDA allocation of the run, bind this rank to its GPU (once). ---*/
+  SelectCudaDeviceForRank();
+#endif
+
   /*--- Device storage mirrors the host allocation; free first so that re-initializing a
    * vector does not leak it. ---*/
   GPUMemoryAllocation::gpu_free(d_vec_val);
