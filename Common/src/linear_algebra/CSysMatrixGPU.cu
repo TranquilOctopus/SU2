@@ -848,11 +848,12 @@ __global__ void LU_SGS_BackwardKernel(const su2uint* __restrict__ level_idx, uns
   auto* partial = reinterpret_cast<ScalarType*>(smem); // serves nVar * nVar threads
   auto* aux = partial + blockSize; // skip nVar * nVar threads, serves nVar threads
 
-  // Compute U.x
+  // Compute U.x, over all columns (halos included, no nRows cutoff) like the host UpperProduct, which
+  // reads the halo values received in the forward sweep exchange.
   if constexpr (Quantized) {
-    partial[tid] = QuantizedDeviceSparseBlockMatVec(iRow, iVar, jVar, nVar, M.row_ptr_u, M.col_ind_u, q_u, q_scale_u, prod, nRows);
+    partial[tid] = QuantizedDeviceSparseBlockMatVec(iRow, iVar, jVar, nVar, M.row_ptr_u, M.col_ind_u, q_u, q_scale_u, prod);
   } else {
-    partial[tid] = DeviceSparseBlockMatVec(iRow, iVar, jVar, nVar, M.row_ptr_u, M.col_ind_u, M.u, prod, nRows);
+    partial[tid] = DeviceSparseBlockMatVec(iRow, iVar, jVar, nVar, M.row_ptr_u, M.col_ind_u, M.u, prod);
   }
   __syncthreads();
 

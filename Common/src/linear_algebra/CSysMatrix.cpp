@@ -485,8 +485,10 @@ void CSysMatrix<ScalarType>::Initialize(unsigned long npoint, unsigned long npoi
        * the factorization on the device. ---*/
       d_ilu_color_idx = FlattenGroupToDevice(color_ilu, ilu_color_ptr, nPointDomain);
 
-      /*--- Flatten levels_ilu the same way. It drives both triangular solves on the device. ---*/
-      d_precond_level_idx = FlattenGroupToDevice(levels_ilu, precond_level_ptr, nPointDomain);
+      /*--- Flatten levels_ilu the same way. It drives both triangular solves on the device. The
+       * levels span all points (halos too) but the device ILU arrays are domain-only, so halo rows
+       * must be dropped, as for LU-SGS above. ---*/
+      d_precond_level_idx = FlattenGroupToDevice(levels_ilu, precond_level_ptr, nPointDomain, nPointDomain);
     }
   }
 
