@@ -154,3 +154,40 @@ TEST_CASE("GG", "[Gradients]") { testGreenGauss<LinearFunction>(); }
 TEST_CASE("LS", "[Gradients]") { testLeastSquares<LinearFunction>(false); }
 
 TEST_CASE("WLS", "[Gradients]") { testLeastSquares<LinearFunction>(true); }
+
+/*!
+ * Check that the shared per-point function gives the same results with the host policy and accessor objects
+ * (as used by computeGradientsGreenGauss) and with the policy and raw views intended for device code.
+ */
+TEST_CASE("GG point views", "[Gradients]") {
+  LinearFunction field;
+  constexpr size_t nDim = 3;
+  const auto& geometry = *field.geometry;
+  const size_t nPoint = geometry.GetnPoint();
+  const size_t nPointDomain = geometry.GetnPointDomain();
+  REQUIRE(geometry.GetnDim() == nDim);
+
+  const auto geom = detail::makeGreenGaussGeomView(geometry);
+
+  /*--- Values of the field stored in a plain array, read through a view. ---*/
+  std::vector<su2double> values(nPoint);
+  for (size_t iPoint = 0; iPoint < nPoint; ++iPoint) values[iPoint] = field(iPoint, 0);
+  gg::FieldView<su2double> fieldView{values.data(), 1};
+
+  C3DDoubleMatrix refGrad(nPoint, field.nVar, nDim);
+  C3DDoubleMatrix viewGrad(nPoint, field.nVar, nDim);
+  gg::GradView<su2double, nDim> gradView{viewGrad.data(), field.nVar};
+
+  for (size_t iPoint = 0; iPoint < nPointDomain; ++iPoint) {
+    gg::greenGaussPoint<nDim, su2double, detail::AdPreacc>(iPoint, geom, field, 0, field.nVar, refGrad);
+    gg::greenGaussPoint<nDim, su2double, gg::NoPreacc>(iPoint, geom, fieldView, 0, field.nVar, gradView);
+  }
+
+  /*--- The two instantiations are separate pieces of code compiled with -ffast-math, so bitwise equality is not
+   *    guaranteed (FMA contraction); the operation order is the same so the difference is only rounding. ---*/
+  su2double err = 0.0;
+  for (size_t iPoint = 0; iPoint < nPointDomain; ++iPoint)
+    for (size_t iDim = 0; iDim < nDim; ++iDim)
+      err = max(err, abs(refGrad(iPoint, 0, iDim) - viewGrad(iPoint, 0, iDim)));
+  CHECK(err < 1e-12);
+}

@@ -29,12 +29,60 @@
 
 #include <vector>
 #include <algorithm>
+#include <utility>
 
 #include "../../../Common/include/parallelization/omp_structure.hpp"
 #include "../../../Common/include/toolboxes/geometry_toolbox.hpp"
 #include "correctGradientsSymmetry.hpp"
+#include "greenGaussPoint.hpp"
 
 namespace detail {
+
+/*!
+ * \brief Preaccumulation policy for the host: forwards to the AD:: functions (empty in non-AD builds).
+ * \note The policy is used by gg::greenGaussPoint at the places where the original code made the calls.
+ */
+struct AdPreacc {
+  /*--- Cannot preaccumulate if hybrid parallel due to shared reading. ---*/
+  static void Start() {
+    if (omp_get_num_threads() == 1) AD::StartPreacc();
+  }
+  template <class T>
+  static void In(T&& data) {
+    AD::SetPreaccIn(std::forward<T>(data));
+  }
+  template <class T>
+  static void InArray(const T& data, size_t size) {
+    AD::SetPreaccIn(data, size);
+  }
+  template <class T>
+  static void Out(T&& data) {
+    AD::SetPreaccOut(std::forward<T>(data));
+  }
+  static void End() { AD::EndPreacc(); }
+};
+
+/*!
+ * \brief Raw view of the geometry for greenGaussPoint, built from the host containers.
+ * \note The edge indices have no public raw accessor, the start of their storage is taken from the
+ *       iterator of point 0 (the outer pointer of the first row is 0).
+ */
+inline auto makeGreenGaussGeomView(const CGeometry& geometry) {
+  gg::GeomView<su2double, CCompressedSparsePatternUL::IndexType, CCompressedSparsePatternL::IndexType> view;
+  const auto* nodes = geometry.nodes;
+  const auto& points = nodes->GetPoints();
+  if (points.empty() || geometry.edges == nullptr) return view;
+
+  view.nbrOuter = points.outerPtr();
+  view.nbrIdx = points.innerIdx();
+  view.edgeIdx = nodes->GetEdges(0).begin();
+  const auto& normal = geometry.edges->GetNormal();
+  view.normal = normal.data();
+  view.normalLd = normal.cols();
+  view.volume = &nodes->GetVolume(0);
+  view.periodicVolume = &nodes->GetPeriodicVolume(0);
+  return view;
+}
 
 /*!
  * \brief Compute the gradient of a field using the Green-Gauss theorem.
@@ -71,55 +119,13 @@ void computeGradientsGreenGauss(CSolver* solver, MPI_QUANTITIES kindMpiComm, PER
 
   static constexpr size_t MAXNVAR = 20;
 
+  const auto geomView = makeGreenGaussGeomView(geometry);
+
   /*--- For each (non-halo) volume integrate over its faces (edges). ---*/
 
   SU2_OMP_FOR_DYN(chunkSize)
   for (size_t iPoint = 0; iPoint < nPointDomain; ++iPoint) {
-    auto nodes = geometry.nodes;
-
-    /*--- Cannot preaccumulate if hybrid parallel due to shared reading. ---*/
-    if (omp_get_num_threads() == 1) AD::StartPreacc();
-    AD::SetPreaccIn(nodes->GetVolume(iPoint));
-    AD::SetPreaccIn(nodes->GetPeriodicVolume(iPoint));
-
-    for (size_t iVar = varBegin; iVar < varEnd; ++iVar) AD::SetPreaccIn(field(iPoint, iVar));
-
-    /*--- Clear the gradient. --*/
-
-    for (size_t iVar = varBegin; iVar < varEnd; ++iVar)
-      for (size_t iDim = 0; iDim < nDim; ++iDim) gradient(iPoint, iVar, iDim) = 0.0;
-
-    /*--- Handle averaging and division by volume in one constant. ---*/
-
-    su2double halfOnVol = 0.5 / (nodes->GetVolume(iPoint) + nodes->GetPeriodicVolume(iPoint));
-
-    /*--- Add a contribution due to each neighbor. ---*/
-
-    for (size_t iNeigh = 0; iNeigh < nodes->GetnPoint(iPoint); ++iNeigh) {
-      size_t iEdge = nodes->GetEdge(iPoint, iNeigh);
-      size_t jPoint = nodes->GetPoint(iPoint, iNeigh);
-
-      /*--- Determine if edge points inwards or outwards of iPoint.
-       *    If inwards we need to flip the area vector. ---*/
-
-      su2double dir = (iPoint < jPoint) ? 1.0 : -1.0;
-      su2double weight = dir * halfOnVol;
-
-      const auto area = geometry.edges->GetNormal(iEdge);
-      AD::SetPreaccIn(area, nDim);
-
-      for (size_t iVar = varBegin; iVar < varEnd; ++iVar) {
-        AD::SetPreaccIn(field(jPoint, iVar));
-        su2double flux = weight * (field(iPoint, iVar) + field(jPoint, iVar));
-
-        for (size_t iDim = 0; iDim < nDim; ++iDim) gradient(iPoint, iVar, iDim) += flux * area[iDim];
-      }
-    }
-
-    for (size_t iVar = varBegin; iVar < varEnd; ++iVar)
-      for (size_t iDim = 0; iDim < nDim; ++iDim) AD::SetPreaccOut(gradient(iPoint, iVar, iDim));
-
-    AD::EndPreacc();
+    gg::greenGaussPoint<nDim, su2double, AdPreacc>(iPoint, geomView, field, varBegin, varEnd, gradient);
   }
   END_SU2_OMP_FOR
 
