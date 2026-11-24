@@ -396,8 +396,13 @@ template <class ScalarType>
 template <class ScalarType>
 __global__ void IluForwardKernel(const su2uint* __restrict__ level_idx, unsigned long level_begin,
                                  unsigned long level_size, unsigned long nVar, DeviceLDU<ScalarType> M,
-                                 const ScalarType* __restrict__ vec, ScalarType* __restrict__ prod) {
+                                 ScalarType* const* io) {
   if (blockIdx.x >= level_size) return;
+
+  /*--- Vectors are read through a device-side slot, io = {vec, prod}, refreshed before every
+   * launch of the graph, so the graph does not depend on which vectors it is applied to. ---*/
+  const ScalarType* __restrict__ vec = io[0];
+  ScalarType* __restrict__ prod = io[1];
 
   const unsigned long iRow = level_idx[level_begin + blockIdx.x];
   const unsigned long tid = threadIdx.x;
@@ -426,8 +431,10 @@ __global__ void IluForwardKernel(const su2uint* __restrict__ level_idx, unsigned
 template <class ScalarType>
 __global__ void IluBackwardKernel(const su2uint* __restrict__ level_idx, unsigned long level_begin,
                                   unsigned long level_size, unsigned long nRows, unsigned long nVar,
-                                  DeviceLDU<ScalarType> M, ScalarType* __restrict__ prod) {
+                                  DeviceLDU<ScalarType> M, ScalarType* const* io) {
   if (blockIdx.x >= level_size) return;
+
+  ScalarType* __restrict__ prod = io[0];  // device-side slot, see IluForwardKernel
 
   const unsigned long iRow = level_idx[level_begin + blockIdx.x];
   const auto blockSize = nVar * nVar;
@@ -546,30 +553,12 @@ __global__ void QuantizedBlockLDU_SpMV_kernel(
 }
 
 /*!
- * \brief Instantiate the freshly captured \p graph into \p exec, or, when \p exec already holds a
- *        graph with the same topology, push the new node parameters into it in place.
- * \note Re-capturing the topology is cheap, instantiating it is not: cudaGraphInstantiate
- *       allocates and builds the executable graph, at a cost that grows with the node count (one
- *       node per level here), so doing it on every call would cost more than simply launching the
- *       kernels and would defeat the purpose of using graphs at all. cudaGraphExecUpdate keeps the
- *       executable graph and only rewrites the kernel arguments that changed, which is what makes
- *       the graphs worth having on the flexible-FGMRES path where the vectors change every call.
- *       The full instantiation stays as the fallback for the first call and for the (unexpected)
- *       case of the topology actually changing.
+ * \brief Make sure the device-side pointer slots (and their pinned host staging copy) exist.
  */
-inline void InstantiateOrUpdateGraph(cudaGraphExec_t& exec, cudaGraph_t graph, const char* what) {
-  SU2_ZONE_SCOPED_N("Graph instantiate or update")
-  if (exec != nullptr) {
-    cudaGraphExecUpdateResultInfo info{};
-    if (cudaGraphExecUpdate(exec, graph, &info) == cudaSuccess) return;
-
-    /*--- A failed update is recoverable (we just instantiate again), but the runtime holds on to
-     * the error, so consume it before the next gpuErrChk mistakes it for a real failure. ---*/
-    cudaGetLastError();
-    gpuErrChk(cudaGraphExecDestroy(exec));
-    exec = nullptr;
-  }
-  gpuErrChk(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+template <class T>
+inline void AllocatePointerSlots(T**& d_slots, T**& h_slots, int n) {
+  if (d_slots == nullptr) gpuErrChk(cudaMalloc(reinterpret_cast<void**>(&d_slots), n * sizeof(T*)));
+  if (h_slots == nullptr) gpuErrChk(cudaMallocHost(reinterpret_cast<void**>(&h_slots), n * sizeof(T*)));
 }
 
 }  // namespace
@@ -738,15 +727,17 @@ void CSysMatrix<ScalarType>::ComputeILUPreconditionerGPU(const CSysVector<Scalar
   const auto sharedBackward = (threads + nVar) * sizeof(ScalarType);
 
   if (aux_stream == nullptr) gpuErrChk(cudaStreamCreate(&aux_stream));
+  AllocatePointerSlots(d_precond_ptrs, h_precond_ptrs, 3);
 
   /*--- Same idea as BuildILUPreconditionerGPU: the launch sequence only depends on the (fixed)
    * level structure, plus the vec/prod device pointers. Unlike the build graph those pointers do
    * change: flexible FGMRES applies the preconditioner as precond(V[i], Z[i]), so they walk the
-   * Krylov basis and differ on every call. The topology does not change though, so we re-record
-   * and let InstantiateOrUpdateGraph patch the new arguments into the executable graph instead of
-   * building a new one. ---*/
-  if (precond_fwd_graph_exec == nullptr || precond_fwd_graph_vec != d_vec || precond_fwd_graph_prod != d_prod) {
-    SU2_ZONE_SCOPED_N("ILU graph recapture")
+   * Krylov basis and differ on every call. Re-capturing on every change costs far more than the
+   * graph saves (thousands of kernel launches per capture), so the graph is captured once and the
+   * kernels read the vectors through a small device-side slot (d_precond_ptrs[0:2] = {vec, prod}),
+   * which is rewritten on the stream right before each launch. ---*/
+  if (precond_fwd_graph_exec == nullptr) {
+    SU2_ZONE_SCOPED_N("ILU graph capture")
 
     cudaGraph_t graph;
     gpuErrChk(cudaStreamBeginCapture(aux_stream, cudaStreamCaptureModeThreadLocal));
@@ -758,7 +749,7 @@ void CSysMatrix<ScalarType>::ComputeILUPreconditionerGPU(const CSysVector<Scalar
       const auto size = precond_level_ptr[level + 1] - begin;
       if (size == 0) continue;
       IluForwardKernel<ScalarType>
-          <<<size, threads, sharedForward, aux_stream>>>(d_precond_level_idx, begin, size, nVar, M, d_vec, d_prod);
+          <<<size, threads, sharedForward, aux_stream>>>(d_precond_level_idx, begin, size, nVar, M, d_precond_ptrs);
     }
 
     /*--- Backward substitution: one exact pass over the levels in decreasing order,
@@ -769,16 +760,19 @@ void CSysMatrix<ScalarType>::ComputeILUPreconditionerGPU(const CSysVector<Scalar
       const auto size = precond_level_ptr[level + 1] - begin;
       if (size == 0) continue;
       IluBackwardKernel<ScalarType>
-          <<<size, threads, sharedBackward, aux_stream>>>(d_precond_level_idx, begin, size, nPointDomain, nVar, M, d_prod);
+          <<<size, threads, sharedBackward, aux_stream>>>(d_precond_level_idx, begin, size, nPointDomain, nVar, M, d_precond_ptrs + 1);
     }
 
     gpuErrChk(cudaStreamEndCapture(aux_stream, &graph));
-    InstantiateOrUpdateGraph(precond_fwd_graph_exec, graph, "ILU preconditioner");
+    gpuErrChk(cudaGraphInstantiate(&precond_fwd_graph_exec, graph, nullptr, nullptr, 0));
     gpuErrChk(cudaGraphDestroy(graph));
-    precond_fwd_graph_vec = d_vec;
-    precond_fwd_graph_prod = d_prod;
   }
 
+  /*--- Point the graph at the current vectors, ordered before it on the same stream. The host
+   * staging copy is not touched again before the stream is synchronized below. ---*/
+  h_precond_ptrs[0] = const_cast<ScalarType*>(d_vec);
+  h_precond_ptrs[1] = d_prod;
+  gpuErrChk(cudaMemcpyAsync(d_precond_ptrs, h_precond_ptrs, 2 * sizeof(ScalarType*), cudaMemcpyHostToDevice, aux_stream));
   gpuErrChk(cudaGraphLaunch(precond_fwd_graph_exec, aux_stream));
   gpuErrChk(cudaStreamSynchronize(aux_stream));
   gpuErrChk(cudaGetLastError());
@@ -796,9 +790,11 @@ template <class ScalarType, class QuantType, class QuantScaleType, bool Quantize
 __global__ void LU_SGS_ForwardKernel(const su2uint* __restrict__ level_idx, unsigned long level_begin,
                                      unsigned long level_size, unsigned long nVar, DeviceLDU<ScalarType> M,
                                      const QuantType* __restrict__ q_l, const QuantScaleType* __restrict__ q_scale_l,
-                                     const ScalarType* __restrict__ invD, const ScalarType* __restrict__ vec,
-                                     ScalarType* __restrict__ prod) {
+                                     const ScalarType* __restrict__ invD, ScalarType* const* io) {
   if (blockIdx.x >= level_size) return;
+
+  const ScalarType* __restrict__ vec = io[0];  // io = {vec, prod}, see IluForwardKernel
+  ScalarType* __restrict__ prod = io[1];
 
   const unsigned long iRow = level_idx[level_begin + blockIdx.x];
   const auto blockSize = nVar * nVar;
@@ -836,8 +832,10 @@ __global__ void LU_SGS_BackwardKernel(const su2uint* __restrict__ level_idx, uns
                                      unsigned long level_size, unsigned long nRows, unsigned long nVar,
                                      DeviceLDU<ScalarType> M, const QuantType* __restrict__ q_u,
                                      const QuantScaleType* __restrict__ q_scale_u, const ScalarType* __restrict__ invD,
-                                     ScalarType* __restrict__ prod) {
+                                     ScalarType* const* io) {
   if (blockIdx.x >= level_size) return;
+
+  ScalarType* __restrict__ prod = io[0];  // device-side slot, see IluForwardKernel
 
   const unsigned long iRow = level_idx[level_begin + blockIdx.x];
   const auto blockSize = nVar * nVar;
@@ -913,10 +911,12 @@ void CSysMatrix<ScalarType>::ComputeLU_SGSForwardGPU(const CSysVector<ScalarType
   const auto sharedForward = (threads + nVar) * sizeof(ScalarType);
 
   if (aux_stream == nullptr) gpuErrChk(cudaStreamCreate(&aux_stream));
+  AllocatePointerSlots(d_precond_ptrs, h_precond_ptrs, 3);
 
-  /*--- First part of the symmetric iteration: (D+L).x* = b ---*/
-  if (precond_fwd_graph_exec == nullptr || precond_fwd_graph_vec != d_vec || precond_fwd_graph_prod != d_prod) {
-    SU2_ZONE_SCOPED_N("LU-SGS fwd graph recapture")
+  /*--- First part of the symmetric iteration: (D+L).x* = b. Captured once, the vectors are read
+   * through the device-side slot d_precond_ptrs[0:2] = {vec, prod}, see ComputeILUPreconditionerGPU. ---*/
+  if (precond_fwd_graph_exec == nullptr) {
+    SU2_ZONE_SCOPED_N("LU-SGS fwd graph capture")
 
     cudaGraph_t graph;
     gpuErrChk(cudaStreamBeginCapture(aux_stream, cudaStreamCaptureModeThreadLocal));
@@ -934,7 +934,7 @@ void CSysMatrix<ScalarType>::ComputeLU_SGSForwardGPU(const CSysVector<ScalarType
         if (size == 0) continue;
         LU_SGS_ForwardKernel<ScalarType, QuantType, QuantScaleType, decltype(quantized)::value>
             <<<size, threads, sharedForward, aux_stream>>>(d_precond_level_idx, begin, size, nVar, M, d_q_blocks.l,
-                                                           d_q_scale.l, d_invM, d_vec, d_prod);
+                                                           d_q_scale.l, d_invM, d_precond_ptrs);
       }
     };
     if (quantized_mode) {
@@ -944,13 +944,13 @@ void CSysMatrix<ScalarType>::ComputeLU_SGSForwardGPU(const CSysVector<ScalarType
     }
 
     gpuErrChk(cudaStreamEndCapture(aux_stream, &graph));
-    InstantiateOrUpdateGraph(precond_fwd_graph_exec, graph, "LU-SGS forward");
+    gpuErrChk(cudaGraphInstantiate(&precond_fwd_graph_exec, graph, nullptr, nullptr, 0));
     gpuErrChk(cudaGraphDestroy(graph));
-    precond_fwd_graph_vec = d_vec;
-    precond_fwd_graph_prod = d_prod;
-
   }
 
+  h_precond_ptrs[0] = const_cast<ScalarType*>(d_vec);
+  h_precond_ptrs[1] = d_prod;
+  gpuErrChk(cudaMemcpyAsync(d_precond_ptrs, h_precond_ptrs, 2 * sizeof(ScalarType*), cudaMemcpyHostToDevice, aux_stream));
   gpuErrChk(cudaGraphLaunch(precond_fwd_graph_exec, aux_stream));
   gpuErrChk(cudaStreamSynchronize(aux_stream));
   gpuErrChk(cudaGetLastError());
@@ -983,10 +983,12 @@ void CSysMatrix<ScalarType>::ComputeLU_SGSBackwardGPU(CSysVector<ScalarType>& pr
   const auto sharedBackward = (threads + nVar) * sizeof(ScalarType);
 
   if (aux_stream == nullptr) gpuErrChk(cudaStreamCreate(&aux_stream));
+  AllocatePointerSlots(d_precond_ptrs, h_precond_ptrs, 3);
 
-  /*--- Second part of the symmetric iteration: (D+U).x_(1) = D.x* ---*/
-  if (precond_bwd_graph_exec == nullptr || precond_bwd_graph_prod != d_prod) {
-    SU2_ZONE_SCOPED_N("LU-SGS bwd graph recapture")
+  /*--- Second part of the symmetric iteration: (D+U).x_(1) = D.x*. Captured once, prod is read
+   * through the device-side slot d_precond_ptrs[2], see ComputeILUPreconditionerGPU. ---*/
+  if (precond_bwd_graph_exec == nullptr) {
+    SU2_ZONE_SCOPED_N("LU-SGS bwd graph capture")
 
     cudaGraph_t graph;
     gpuErrChk(cudaStreamBeginCapture(aux_stream, cudaStreamCaptureModeThreadLocal));
@@ -1002,7 +1004,7 @@ void CSysMatrix<ScalarType>::ComputeLU_SGSBackwardGPU(CSysVector<ScalarType>& pr
         if (size == 0) continue;
         LU_SGS_BackwardKernel<ScalarType, QuantType, QuantScaleType, decltype(quantized)::value>
             <<<size, threads, sharedBackward, aux_stream>>>(d_precond_level_idx, begin, size, nPointDomain, nVar, M,
-                                                            d_q_blocks.u, d_q_scale.u, d_invM, d_prod);
+                                                            d_q_blocks.u, d_q_scale.u, d_invM, d_precond_ptrs + 2);
       }
     };
     if (quantized_mode) {
@@ -1012,12 +1014,12 @@ void CSysMatrix<ScalarType>::ComputeLU_SGSBackwardGPU(CSysVector<ScalarType>& pr
     }
 
     gpuErrChk(cudaStreamEndCapture(aux_stream, &graph));
-    InstantiateOrUpdateGraph(precond_bwd_graph_exec, graph, "LU-SGS backward");
+    gpuErrChk(cudaGraphInstantiate(&precond_bwd_graph_exec, graph, nullptr, nullptr, 0));
     gpuErrChk(cudaGraphDestroy(graph));
-    precond_bwd_graph_prod = d_prod;
-
   }
 
+  h_precond_ptrs[2] = d_prod;
+  gpuErrChk(cudaMemcpyAsync(d_precond_ptrs + 2, h_precond_ptrs + 2, sizeof(ScalarType*), cudaMemcpyHostToDevice, aux_stream));
   gpuErrChk(cudaGraphLaunch(precond_bwd_graph_exec, aux_stream));
   gpuErrChk(cudaStreamSynchronize(aux_stream));
   gpuErrChk(cudaGetLastError());

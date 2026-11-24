@@ -426,14 +426,12 @@ class CSysMatrix {
   mutable bool ilu_can_refine = true;
   mutable struct CUgraphExec_st* precond_fwd_graph_exec = nullptr;  // ILU or LU-SGS forward only
   mutable struct CUgraphExec_st* precond_bwd_graph_exec = nullptr;  // LU-SGS backward only
-  mutable const ScalarType* precond_fwd_graph_vec = nullptr;        /*!< \brief Pointers the apply graph
-                                                                     * was captured with, to detect when
-                                                                     * it must be recaptured (the
-                                                                     * executable graph itself is then
-                                                                     * updated in place, not rebuilt,
-                                                                     * see InstantiateOrUpdateGraph). */
-  mutable ScalarType* precond_fwd_graph_prod = nullptr;
-  mutable ScalarType* precond_bwd_graph_prod = nullptr;
+  /*--- The apply graphs are captured once and never re-recorded: the kernels read the vectors they
+   * work on through this device-side slot, {fwd vec, fwd prod, bwd prod}, which is rewritten
+   * (from the pinned staging copy) on aux_stream before each launch. This matters because the
+   * flexible Krylov solvers pass a different vector pair on almost every call. ---*/
+  mutable ScalarType** d_precond_ptrs = nullptr;
+  mutable ScalarType** h_precond_ptrs = nullptr;
 
   /*--- Non-default stream, needed for two uses: (1) the preconditioner build/apply CUDA graphs
    * below, since the legacy default stream cannot be captured into a graph; (2) HtDTransfer's

@@ -173,6 +173,8 @@ CSysMatrix<ScalarType>::~CSysMatrix() {
     if (ilu_build_graph_exec != nullptr) cudaGraphExecDestroy(ilu_build_graph_exec);
     if (precond_fwd_graph_exec != nullptr) cudaGraphExecDestroy(precond_fwd_graph_exec);
     if (precond_bwd_graph_exec != nullptr) cudaGraphExecDestroy(precond_bwd_graph_exec);
+    if (d_precond_ptrs != nullptr) cudaFree(d_precond_ptrs);
+    if (h_precond_ptrs != nullptr) cudaFreeHost(h_precond_ptrs);
     if (aux_stream != nullptr) cudaStreamDestroy(aux_stream);
     if (htd_event != nullptr) cudaEventDestroy(htd_event);
 #endif
