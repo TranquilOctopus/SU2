@@ -260,6 +260,11 @@ void SelectCudaDeviceForRank(bool allowCollectives) {
 template <class ScalarType>
 void CSysVector<ScalarType>::HtDTransfer(bool trigger) const {
   SU2_ZONE_SCOPED
+  /*--- Page-lock the host storage on first use (once, see host_pin_state): copies from pinned memory are DMA'd
+   * directly instead of being staged through a driver bounce buffer. Falls back to pageable on failure. ---*/
+  if (trigger && host_pin_state == 0) {
+    host_pin_state = GPUMemoryAllocation::pinned_register(vec_val, sizeof(ScalarType) * nElm) ? 1 : 2;
+  }
   if (trigger)
     gpuErrChk(cudaMemcpy((void*)(d_vec_val), (void*)&vec_val[0], (sizeof(ScalarType) * nElm), cudaMemcpyHostToDevice));
 }
@@ -267,6 +272,9 @@ void CSysVector<ScalarType>::HtDTransfer(bool trigger) const {
 template <class ScalarType>
 void CSysVector<ScalarType>::DtHTransfer(bool trigger) const {
   SU2_ZONE_SCOPED
+  if (trigger && host_pin_state == 0) {
+    host_pin_state = GPUMemoryAllocation::pinned_register(vec_val, sizeof(ScalarType) * nElm) ? 1 : 2;
+  }
   if (trigger)
     gpuErrChk(cudaMemcpy((void*)(&vec_val[0]), (void*)d_vec_val, (sizeof(ScalarType) * nElm), cudaMemcpyDeviceToHost));
 }

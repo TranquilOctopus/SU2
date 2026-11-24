@@ -40,6 +40,9 @@ void CSysVector<ScalarType>::Initialize(unsigned long numBlk, unsigned long numB
     SU2_MPI::Error("Only the master thread is allowed to initialize the vector.", CURRENT_FUNCTION);
 
   if (nElm != numBlk * numVar) {
+    /*--- Registered memory has to be unregistered before it is freed. ---*/
+    if (host_pin_state == 1) GPUMemoryAllocation::pinned_unregister(vec_val);
+    host_pin_state = 0;
     MemoryAllocation::aligned_free(vec_val);
     vec_val = nullptr;
   }
@@ -165,6 +168,7 @@ CSysVector<ScalarType>::~CSysVector() {
   if constexpr (!std::is_trivial_v<ScalarType>) {
     for (auto i = 0ul; i < nElm; i++) vec_val[i].~ScalarType();
   }
+  if (host_pin_state == 1) GPUMemoryAllocation::pinned_unregister(vec_val);
   MemoryAllocation::aligned_free(vec_val);
 
   GPUMemoryAllocation::gpu_free(d_vec_val);

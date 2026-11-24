@@ -179,4 +179,37 @@ inline void pinned_free(T* ptr) noexcept {
   gpuErrChk(cudaFreeHost((void*)ptr));
 #endif
 }
+
+/*!
+ * \brief Page-lock an existing host allocation (cudaHostRegister) so that transfers from/to it run at
+ *        pinned-memory speed, without changing how it is allocated or freed.
+ * \note Never fatal: if registering fails (pinned-memory limit, overlap with another registered range...)
+ *       a warning is printed once per process and the caller keeps using the pageable buffer.
+ *       The memory must be unregistered (pinned_unregister) before it is freed or reallocated.
+ * \return True if the range is now registered.
+ */
+inline bool pinned_register(void* ptr, size_t size) noexcept {
+#if defined(HAVE_CUDA)
+  if (ptr == nullptr || size == 0) return false;
+  const auto err = cudaHostRegister(ptr, size, cudaHostRegisterDefault);
+  if (err == cudaSuccess) return true;
+  (void)cudaGetLastError();  // clear the (non sticky) error so later checks do not trip over it
+  static bool warned = false;
+  if (!warned) {
+    warned = true;
+    std::cerr << "WARNING: could not page-lock host memory for CUDA transfers (" << cudaGetErrorString(err)
+              << "), falling back to pageable (slower) copies." << std::endl;
+  }
+#endif
+  return false;
+}
+
+/*!
+ * \brief Undo pinned_register, only call for ranges that were successfully registered.
+ */
+inline void pinned_unregister(void* ptr) noexcept {
+#if defined(HAVE_CUDA)
+  if (ptr != nullptr) (void)cudaHostUnregister(ptr);
+#endif
+}
 }  // namespace GPUMemoryAllocation

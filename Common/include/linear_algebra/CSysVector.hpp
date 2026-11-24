@@ -217,6 +217,10 @@ class CSysVector : public VecExpr::CVecExpr<CSysVector<ScalarType>, ScalarType> 
 
   ScalarType* d_vec_val = nullptr; /*!< \brief Device Pointer to store the vector values on the GPU. */
 
+  /*!< \brief Host storage page-locked state: 0 not tried, 1 registered (cudaHostRegister), 2 failed (stay pageable).
+   * Registered lazily by the first HtD/DtH transfer, so only vectors that actually cross the bus are pinned. */
+  mutable signed char host_pin_state = 0;
+
 #ifdef HAVE_OMP
   mutable std::unique_ptr<ScalarType[]>
       dot_scratch; /*!< \brief Stores partial sums for ordered reduction over OMP threads. */
@@ -354,6 +358,7 @@ class CSysVector : public VecExpr::CVecExpr<CSysVector<ScalarType>, ScalarType> 
     std::swap(omp_chunk_size, other.omp_chunk_size);
     std::swap(vec_val, other.vec_val);
     std::swap(d_vec_val, other.d_vec_val);
+    std::swap(host_pin_state, other.host_pin_state);
     std::swap(nElm, other.nElm);
     std::swap(nElmDomain, other.nElmDomain);
     std::swap(nVar, other.nVar);

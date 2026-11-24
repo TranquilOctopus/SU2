@@ -127,6 +127,11 @@ CSysMatrix<ScalarType>::~CSysMatrix() {
   SU2_ZONE_SCOPED
 
   delete[] omp_partitions;
+  if (host_pinned) {
+    GPUMemoryAllocation::pinned_unregister(mat.d);
+    GPUMemoryAllocation::pinned_unregister(mat.l);
+    GPUMemoryAllocation::pinned_unregister(mat.u);
+  }
   auto freeHostLDU = [](auto& m) {
     MemoryAllocation::aligned_free(m.d);
     MemoryAllocation::aligned_free(m.l);
@@ -298,6 +303,22 @@ void CSysMatrix<ScalarType>::Initialize(unsigned long npoint, unsigned long npoi
   } else {
     allocAndInit(mat.l, mat.nnz_l * nVar * nEqn);
     allocAndInit(mat.u, mat.nnz_u * nVar * nEqn);
+  }
+
+  /*--- Page-lock the host Jacobian blocks, they are uploaded every linear solve (see HtDTransfer). With
+   * the quantized storage mat.l/.u do not exist and the pinned q_* arrays are used instead. All or nothing,
+   * on failure the arrays simply stay pageable. ---*/
+  if (useCuda && !quantized_mode) {
+    const auto bytes = sizeof(ScalarType) * nVar * nEqn;
+    const bool okD = GPUMemoryAllocation::pinned_register(mat.d, nPoint * bytes);
+    const bool okL = GPUMemoryAllocation::pinned_register(mat.l, mat.nnz_l * bytes);
+    const bool okU = GPUMemoryAllocation::pinned_register(mat.u, mat.nnz_u * bytes);
+    host_pinned = okD && okL && okU;
+    if (!host_pinned) {
+      if (okD) GPUMemoryAllocation::pinned_unregister(mat.d);
+      if (okL) GPUMemoryAllocation::pinned_unregister(mat.l);
+      if (okU) GPUMemoryAllocation::pinned_unregister(mat.u);
+    }
   }
 
   auto GPUAllocAndInit = [](ScalarType*& ptr, unsigned long num) {

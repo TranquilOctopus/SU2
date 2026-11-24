@@ -370,6 +370,10 @@ class CSysMatrix {
 
   bool useCuda = false; /*!< \brief Whether CUDA is enabled. */
 
+  /*!< \brief Whether mat.d/.l/.u are page-locked (cudaHostRegister, done once in Initialize). These host arrays
+   * are never reallocated, and must be unregistered before they are freed. */
+  bool host_pinned = false;
+
   /*!< \brief Whether the inverse diagonal blocks are only needed on the device. False for the
    * Linelet preconditioner, which builds the Jacobi one but reads invM on the host. */
   bool jacobi_on_device = false;
