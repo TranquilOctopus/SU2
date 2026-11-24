@@ -39,6 +39,24 @@ su2_cfd_tests_ad = files(['Common/simple_ad_test.cpp',
 su2_cfd_tests_dd = files(['Common/simple_directdiff_test.cpp',
                           'SU2_CFD/solvers/under_relaxation_ad_tests.cpp'])
 
+# Tests of the CUDA kernels, they need a device. The .cu file is built by nvcc, which takes only
+# the defines out of su2_cpp_args (see common_cuda_src in Common/src/meson.build). The stale data
+# checks of the device mirrors are switched on for these tests.
+su2_cuda_tests = []
+su2_cuda_test_args = []
+su2_cuda_test_cuda_args = []
+if get_option('enable-cuda')
+  su2_cuda_tests = files(['Common/containers/CDeviceMirror_tests.cpp',
+                          'Common/containers/CDeviceMirror_kernels.cu'])
+  su2_cuda_test_args = ['-DSU2_GPU_CHECK_STALE']
+  foreach arg : su2_cpp_args
+    if arg.startswith('-D') or arg.startswith('-U')
+      su2_cuda_test_cuda_args += arg
+    endif
+  endforeach
+  su2_cuda_test_cuda_args += '-DSU2_GPU_CHECK_STALE'
+endif
+
 # -------------------------------------------------------------------------
 # End of unit test listings
 # -------------------------------------------------------------------------
@@ -46,7 +64,7 @@ su2_cfd_tests_dd = files(['Common/simple_directdiff_test.cpp',
 
 if get_option('enable-tests')
   if get_option('enable-normal')
-    unit_test_files = su2_cfd_tests + files(['test_driver.cpp'])
+    unit_test_files = su2_cfd_tests + su2_cuda_tests + files(['test_driver.cpp'])
     dependencies_default = [su2_cfd_dep, common_dep, su2_deps, catch2_dep]
     test_driver = executable(
         'test_driver',
@@ -54,7 +72,8 @@ if get_option('enable-tests')
         install : true,
         install_rpath : '$ORIGIN/../lib',
         dependencies : dependencies_default,
-        cpp_args: ['-fPIC', default_warning_flags, su2_cpp_args]
+        cpp_args: ['-fPIC', default_warning_flags, su2_cpp_args, su2_cuda_test_args],
+        cuda_args: su2_cuda_test_cuda_args
     )
     test('Catch2 test driver', test_driver)
     test('NEMO convergence field migration', python,

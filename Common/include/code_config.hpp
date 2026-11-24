@@ -112,6 +112,16 @@ FORCEINLINE Out su2staticcast_p(In ptr) {
 #define SU2_ENABLE_CUDA_KERNELS
 #endif
 
+/*--- Marks a function callable from both host and device code. It is only active when nvcc compiles code that
+ * belongs to the CUDA kernels of this build, everything else (the host compiler, AD builds) sees nothing.
+ * Functions marked with it must be templates or inline, take plain pointers or small views, and only call
+ * other SU2_HOST_DEVICE code: no std containers, virtual calls, exceptions or MPI. ---*/
+#if defined(__CUDACC__) && defined(SU2_ENABLE_CUDA_KERNELS)
+#define SU2_HOST_DEVICE __host__ __device__
+#else
+#define SU2_HOST_DEVICE
+#endif
+
 /*--- No full single precision for AD builds. ---*/
 #if (defined(CODI_REVERSE_TYPE) || defined(CODI_FORWARD_TYPE)) && defined(USE_SINGLE_PRECISION)
 #undef USE_SINGLE_PRECISION
