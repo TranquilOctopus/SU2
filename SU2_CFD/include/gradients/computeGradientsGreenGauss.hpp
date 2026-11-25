@@ -64,8 +64,6 @@ struct AdPreacc {
 
 /*!
  * \brief Raw view of the geometry for greenGaussPoint, built from the host containers.
- * \note The edge indices have no public raw accessor, the start of their storage is taken from the
- *       iterator of point 0 (the outer pointer of the first row is 0).
  */
 inline auto makeGreenGaussGeomView(const CGeometry& geometry) {
   gg::GeomView<su2double, CCompressedSparsePatternUL::IndexType, CCompressedSparsePatternL::IndexType> view;
@@ -75,7 +73,7 @@ inline auto makeGreenGaussGeomView(const CGeometry& geometry) {
 
   view.nbrOuter = points.outerPtr();
   view.nbrIdx = points.innerIdx();
-  view.edgeIdx = nodes->GetEdges(0).begin();
+  view.edgeIdx = nodes->GetEdges().innerIdx();
   const auto& normal = geometry.edges->GetNormal();
   view.normal = normal.data();
   view.normalLd = normal.cols();

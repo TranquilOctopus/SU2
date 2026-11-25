@@ -47,7 +47,8 @@ su2_cuda_test_args = []
 su2_cuda_test_cuda_args = []
 if get_option('enable-cuda')
   su2_cuda_tests = files(['Common/containers/CDeviceMirror_tests.cpp',
-                          'Common/containers/CDeviceMirror_kernels.cu'])
+                          'Common/containers/CDeviceMirror_kernels.cu',
+                          'Common/geometry/CGeometryDevice_tests.cpp'])
   su2_cuda_test_args = ['-DSU2_GPU_CHECK_STALE']
   foreach arg : su2_cpp_args
     if arg.startswith('-D') or arg.startswith('-U')

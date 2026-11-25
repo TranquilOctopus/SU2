@@ -28,6 +28,7 @@
 #include <unordered_set>
 
 #include "../../include/geometry/CGeometry.hpp"
+#include "../../include/geometry/CGeometryDevice.hpp"
 #include "../../include/geometry/elements/CElement.hpp"
 #include "../../include/parallelization/omp_structure.hpp"
 #include "../../include/toolboxes/geometry_toolbox.hpp"
@@ -35,7 +36,19 @@
 
 CGeometry::CGeometry() : size(SU2_MPI::GetSize()), rank(SU2_MPI::GetRank()) {}
 
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+const CGeometryDevice& CGeometry::GetDevice(const CConfig* config) const {
+  if (!deviceGeometry) deviceGeometry.reset(new CGeometryDevice(*this, *config));
+  return *deviceGeometry;
+}
+#endif
+
 CGeometry::~CGeometry() {
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+  /*--- The device copy page-locks host arrays of this geometry, it has to go before they are freed. ---*/
+  deviceGeometry.reset();
+#endif
+
   unsigned long iElem, iElem_Bound, iVertex;
   unsigned short iMarker;
 

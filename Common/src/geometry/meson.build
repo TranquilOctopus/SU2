@@ -3,4 +3,5 @@ common_src += files(['CGeometry.cpp',
                      'CPhysicalGeometryFEM.cpp',
                      'CMultiGridGeometry.cpp',
                      'CDummyGeometry.cpp',
-                     'CMultiGridQueue.cpp'])
+                     'CMultiGridQueue.cpp',
+                     'CGeometryDevice.cpp'])

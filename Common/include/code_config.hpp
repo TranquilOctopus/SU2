@@ -50,6 +50,12 @@
 #define NEVERINLINE inline
 #endif
 
+/*--- The device snapshot of the mesh (CGeometryDevice) copies su2double arrays byte for byte, so it needs a
+ * trivially copyable su2double: it exists in builds with CUDA that are not AD builds. ---*/
+#if defined(HAVE_CUDA) && !defined(CODI_FORWARD_TYPE) && !defined(CODI_REVERSE_TYPE)
+#define SU2_ENABLE_GEOMETRY_DEVICE
+#endif
+
 /*--- Marks a function callable from both host and device code, a no-op outside nvcc. ---*/
 #ifdef __CUDACC__
 #define SU2_CUDA_HOST_DEVICE __host__ __device__

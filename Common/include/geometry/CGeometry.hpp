@@ -66,6 +66,10 @@ extern "C" {
 
 using namespace std;
 
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+class CGeometryDevice;
+#endif
+
 /*!
  * \class CGeometry
  * \brief Parent class for defining the geometry of the problem (complete geometry,
@@ -245,6 +249,11 @@ class CGeometry {
  protected:
   mutable CLineletInfo lineletInfo;
 
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+  /*! @brief GPU copy of the geometry, built on first use (never in a CPU run). */
+  mutable std::unique_ptr<CGeometryDevice> deviceGeometry;
+#endif
+
  public:
   /*--- Main geometric elements of the grid. ---*/
 
@@ -374,6 +383,15 @@ class CGeometry {
    * \brief Destructor of the class.
    */
   virtual ~CGeometry();
+
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+  /*!
+   * @brief Read-only copy of the geometry on the GPU, uploaded the first time it is requested.
+   * @note Not thread safe, do not call inside a parallel region. The copy is not updated if the geometry changes.
+   * @param[in] config - Configuration, used when the copy is built.
+   */
+  const CGeometryDevice& GetDevice(const CConfig* config) const;
+#endif
 
   /*!
    * \brief Routine to launch non-blocking recvs only for all periodic communications.

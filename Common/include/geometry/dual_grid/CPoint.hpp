@@ -241,6 +241,11 @@ class CPoint {
   const CCompressedSparsePatternUL& GetPoints() const { return Point; }
 
   /*!
+   * @brief Edges of all the points, same sparsity pattern as GetPoints() (for raw access, e.g. to copy to a device).
+   */
+  const CCompressedSparsePatternL& GetEdges() const { return Edge; }
+
+  /*!
    * \brief Reset the points that compose the control volume.
    */
   inline void ResetPoints() {
