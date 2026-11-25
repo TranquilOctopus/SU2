@@ -5931,7 +5931,7 @@ void CConfig::SetPostprocessing(SU2_COMPONENT val_software, unsigned short val_i
                    CURRENT_FUNCTION);
   }
 
-  /*--- Offloading of the Green-Gauss gradients to the GPU. Every requirement that is not met is an error, there
+  /*--- Offloading of the gradients (Green-Gauss, least squares, weighted least squares) to the GPU. Every requirement that is not met is an error, there
    * is no silent fallback to the CPU. ---*/
 
   if (GetCUDA_Offload(CUDA_OFFLOAD::GRADIENTS)) {
@@ -5944,9 +5944,7 @@ void CConfig::SetPostprocessing(SU2_COMPONENT val_software, unsigned short val_i
       reason = "this build has no CUDA kernels for it (they are only built into the primal solver, with -Denable-cuda=true).";
     }
 #else
-    else if (Kind_Gradient_Method != GREEN_GAUSS && Kind_Gradient_Method_Recon != GREEN_GAUSS) {
-      reason = "NUM_METHOD_GRAD or NUM_METHOD_GRAD_RECON must be GREEN_GAUSS (least squares gradients are not offloaded).";
-    } else if (nMarker_PerBound > 0) {
+    else if (nMarker_PerBound > 0) {
       reason = "periodic markers are not supported.";
     } else if (GetGrid_Movement() || Deform_Mesh) {
       reason = "grid movement and mesh deformation are not supported.";

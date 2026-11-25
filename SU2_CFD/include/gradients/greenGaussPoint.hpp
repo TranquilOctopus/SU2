@@ -68,6 +68,7 @@ struct GradView {
  */
 struct NoPreacc {
   SU2_HOST_DEVICE static void Start() {}
+  SU2_HOST_DEVICE static void StartUnguarded() {}
   template <class T>
   SU2_HOST_DEVICE static void In(T&&) {}
   template <class T>

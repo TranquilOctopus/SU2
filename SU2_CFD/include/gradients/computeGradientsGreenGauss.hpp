@@ -27,6 +27,8 @@
  * License along with SU2. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#pragma once
+
 #include <vector>
 #include <algorithm>
 #include <utility>
@@ -59,6 +61,8 @@ struct AdPreacc {
   static void Out(T&& data) {
     AD::SetPreaccOut(std::forward<T>(data));
   }
+  /*--- For the regions that were started unconditionally by the original code. ---*/
+  static void StartUnguarded() { AD::StartPreacc(); }
   static void End() { AD::EndPreacc(); }
 };
 

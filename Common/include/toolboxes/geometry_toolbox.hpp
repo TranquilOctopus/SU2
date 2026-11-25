@@ -29,6 +29,8 @@
 #include <cmath>
 #include <algorithm>
 
+#include "../code_config.hpp"
+
 namespace GeometryToolbox {
 /// \addtogroup GeometryToolbox
 /// @{
@@ -49,7 +51,7 @@ inline T Distance(Int nDim, const T* a, const U* b) {
 
 /*! \brief d = a-b */
 template <class T, typename Int>
-inline void Distance(Int nDim, const T* a, const T* b, T* d) {
+SU2_HOST_DEVICE inline void Distance(Int nDim, const T* a, const T* b, T* d) {
   for (Int i = 0; i < nDim; i++) d[i] = a[i] - b[i];
 }
 
@@ -62,7 +64,7 @@ inline void PointPointReflect(Int nDim, const T* a, const T* b, T* d) {
 
 /*! \return a.b */
 template <class T, typename Int>
-inline T DotProduct(Int nDim, const T* a, const T* b) {
+SU2_HOST_DEVICE inline T DotProduct(Int nDim, const T* a, const T* b) {
   T d(0);
   for (Int i = 0; i < nDim; ++i) d += a[i] * b[i];
   return d;
@@ -70,7 +72,7 @@ inline T DotProduct(Int nDim, const T* a, const T* b) {
 
 /*! \return ||a||^2 */
 template <class T, typename Int>
-inline T SquaredNorm(Int nDim, const T* a) {
+SU2_HOST_DEVICE inline T SquaredNorm(Int nDim, const T* a) {
   return DotProduct(nDim, a, a);
 }
 

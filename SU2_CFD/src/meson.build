@@ -200,11 +200,13 @@ su2_cfd_src += files(['limiters/CLimiterDetails.cpp'])
 # computeGradientsGreenGaussGPU.cu must give bit-identical results to the CPU implementation of the same
 # gradient. The host build (-march=native -ffast-math) contracts "grad += flux * area" into FMAs, so this file is
 # compiled with FMA contraction on, explicitly (-fmad=false would not match the host). See the comments in the
-# file and the unit test, rerun it if the host compiler flags change.
+# file and the unit test, rerun it if the host compiler flags change. The same holds for
+# computeGradientsLeastSquaresGPU.cu, see the tolerance in its header and in the unit test.
 su2_cfd_cuda_src = []
 su2_cfd_cuda_args = []
 if get_option('enable-cuda')
-  su2_cfd_cuda_src += files(['gradients/computeGradientsGreenGaussGPU.cu'])
+  su2_cfd_cuda_src += files(['gradients/computeGradientsGreenGaussGPU.cu',
+                             'gradients/computeGradientsLeastSquaresGPU.cu'])
   foreach arg : su2_cpp_args
     if arg.startswith('-D') or arg.startswith('-U')
       su2_cfd_cuda_args += arg

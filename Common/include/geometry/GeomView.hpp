@@ -30,7 +30,7 @@
 namespace gg {
 
 /*!
- * @brief Raw, read-only view of the geometry needed by the Green-Gauss volume contribution.
+ * @brief Raw, read-only view of the geometry needed by the Green-Gauss volume contribution and the least-squares gradient.
  * @note Neighbors and edges share one CSR structure: the outer pointers are those of the point adjacency
  *       (CPoint::Point), the edge indices (CPoint::Edge) have the same sparsity pattern by construction.
  * @note The index types are those of the host containers (CCompressedSparsePatternUL / L, whose width depends
@@ -45,6 +45,8 @@ struct GeomView {
   size_t normalLd = 0;                      /*!< @brief Row length of "normal" (number of dimensions). */
   const Scalar* volume = nullptr;           /*!< @brief Control volume of each point. */
   const Scalar* periodicVolume = nullptr;   /*!< @brief Missing volume of points on periodic boundaries. */
+  const Scalar* coord = nullptr;            /*!< @brief Point coordinates, row-major, one row per point (least squares). */
+  size_t coordLd = 0;                       /*!< @brief Row length of "coord" (number of dimensions). */
 };
 
 }  // namespace gg

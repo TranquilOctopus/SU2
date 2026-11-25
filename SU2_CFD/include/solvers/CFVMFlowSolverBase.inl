@@ -498,9 +498,63 @@ void CFVMFlowSolverBase<V, R>::SetPrimitive_Gradient_LS(CGeometry* geometry, con
   auto& gradient = reconstruction ? nodes->GetGradient_Reconstruction() : nodes->GetGradient_Primitive();
   const auto comm = reconstruction? MPI_QUANTITIES::PRIMITIVE_GRAD_REC : MPI_QUANTITIES::PRIMITIVE_GRADIENT;
 
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+  /*--- The device copy of the geometry is that of the finest grid, the coarse multigrid levels use the CPU. ---*/
+  if (config->GetCUDA_Offload(CUDA_OFFLOAD::GRADIENTS) && MGLevel == MESH_0) {
+    SetPrimitive_Gradient_LS_Device(geometry, config, reconstruction, weighted, comm);
+    return;
+  }
+#endif
+
   computeGradientsLeastSquares(this, comm, commPer, *geometry, *config, weighted,
                                primitives, 0, nPrimVarGrad, prim_idx.Velocity(), gradient, rmatrix);
 }
+
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+template <class V, ENUM_REGIME R>
+void CFVMFlowSolverBase<V, R>::SetPrimitive_Gradient_LS_Device(CGeometry* geometry, const CConfig* config,
+                                                               bool reconstruction, bool weighted,
+                                                               MPI_QUANTITIES comm) {
+  /*--- Everything (accumulation and solution at the domain points, symmetry corrections, halo exchange) is done on
+   * the GPU by one thread, see ls_gpu::ComputeGradientsLeastSquares. The R matrix is not needed on the host (its
+   * only readers are the periodic communications, periodic markers are not supported by the offload). ---*/
+  const auto& primitives = nodes->GetPrimitive();
+  auto& gradient = reconstruction ? nodes->GetGradient_Reconstruction() : nodes->GetGradient_Primitive();
+
+  const bool checkComms = gg_gpu::CheckCommsRequested();
+  static std::vector<su2double> deviceResult;
+
+  BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS {
+    const auto& device = geometry->GetDevice(config);
+    if (!deviceData) deviceData.reset(new CFlowDeviceData);
+
+    bool firstCall = false;
+    ls_gpu::ComputeGradientsLeastSquares(*deviceData, device, weighted, primitives.data(), primitives.cols(),
+                                         gradient.data(), gradient.rows(), nPrimVarGrad, prim_idx.Velocity(),
+                                         reconstruction ? 1 : 0, firstCall);
+    if (firstCall && rank == MASTER_NODE) {
+      std::cout << "CUDA_OFFLOAD: the " << (weighted ? "weighted " : "unweighted ")
+                << "least-squares gradient of the primitive variables is computed on the GPU"
+                << (reconstruction ? " (reconstruction gradient)." : ".") << std::endl;
+    }
+    if (checkComms) deviceResult.assign(gradient.data(), gradient.data() + nPoint * gradient.rows() * nDim);
+  }
+  END_SU2_OMP_SAFE_GLOBAL_ACCESS
+
+  /*--- With the check on, the CPU communication runs anyway on the host gradient that the device produced, and the
+   * halo rows it writes are compared with the ones that came from the device exchange. ---*/
+  if (checkComms) {
+    InitiateComms(geometry, config, comm);
+    CompleteComms(geometry, config, comm);
+    BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS {
+      gg_gpu::CheckHaloRows(deviceResult.data(), gradient.data(), geometry->GetnPointDomain(), nPoint,
+                            gradient.rows() * nDim, nPrimVarGrad * nDim, rank,
+                            reconstruction ? "LS reconstruction gradient" : "LS gradient");
+    }
+    END_SU2_OMP_SAFE_GLOBAL_ACCESS
+  }
+}
+#endif
 
 template <class V, ENUM_REGIME R>
 void CFVMFlowSolverBase<V, R>::SetPrimitive_Limiter(CGeometry* geometry, const CConfig* config) {

@@ -27,7 +27,10 @@
 
 #ifdef SU2_ENABLE_GEOMETRY_DEVICE
 
+#include <algorithm>
 #include <cmath>
+#include <iomanip>
+#include <iostream>
 #include <cstring>
 #include <random>
 #include <vector>
@@ -37,6 +40,8 @@
 #include "../../Common/include/containers/container_decorators.hpp"
 #include "../../SU2_CFD/include/gradients/computeGradientsGreenGauss.hpp"
 #include "../../SU2_CFD/include/gradients/computeGradientsGreenGaussGPU.hpp"
+#include "../../SU2_CFD/include/gradients/computeGradientsLeastSquares.hpp"
+#include "../../SU2_CFD/include/gradients/computeGradientsLeastSquaresGPU.hpp"
 
 namespace {
 
@@ -300,6 +305,156 @@ TEST_CASE("Gradient symmetry correction on the GPU is bit-identical to the CPU (
   SECTION("4 variables in a gradient that stores 6") {
     RunSymmetryComparison<2>(*testCase.geometry, *testCase.config, 4, 1, 2, 9);
   }
+}
+
+/*============================================================================================================
+ * Least-squares gradient (unweighted and inverse-distance weighted): CPU against GPU.
+ *
+ * Unlike the Green-Gauss kernels, the least-squares kernel is not bit-identical to the CPU, the policy is a
+ * relative difference of at most kLsTolerance (the number of entries that differ in bits and the worst differences
+ * are printed). The host (-O3 -march=native -ffast-math) rewrites the solve: in the disassembly of the 2D solve it
+ * replaces sqrt(x)*sqrt(x) by x and merges divisions by detR2 into a packed division, the device compiler
+ * (-fmad=true, IEEE division and square root) computes the operations as written. The differences are a few ulp.
+ *============================================================================================================*/
+
+namespace {
+
+constexpr double kLsTolerance = 1e-13;
+
+/*--- Worst relative difference of the domain rows relative to the largest entry of the (point, variable) vector,
+ *    which is the meaningful measure when components cancel, and the worst difference per entry (|a-b| /
+ *    max(|a|,|b|), zero if equal), and the number of entries that differ in bits. ---*/
+template <size_t nDim>
+double LsMaxRelDiff(const CGeometry& geometry, size_t nVar, const C3DDoubleMatrix& cpu, const C3DDoubleMatrix& gpu,
+                    double& maxEntryRel, size_t& nDiff) {
+  const size_t nPointDomain = geometry.GetnPointDomain();
+  maxEntryRel = 0.0;
+  nDiff = 0;
+  double maxVecRel = 0.0;
+  for (size_t iPoint = 0; iPoint < nPointDomain; ++iPoint) {
+    for (size_t iVar = 0; iVar < nVar; ++iVar) {
+      double scale = 0.0, diff = 0.0;
+      for (size_t iDim = 0; iDim < nDim; ++iDim) {
+        const double a = cpu(iPoint, iVar, iDim), b = gpu(iPoint, iVar, iDim);
+        scale = std::max(scale, std::max(std::abs(a), std::abs(b)));
+        diff = std::max(diff, std::abs(a - b));
+        if (std::memcmp(&a, &b, sizeof(double)) != 0) {
+          ++nDiff;
+          maxEntryRel = std::max(maxEntryRel, std::abs(a - b) / std::max(std::abs(a), std::abs(b)));
+        }
+      }
+      if (scale > 0.0) maxVecRel = std::max(maxVecRel, diff / scale);
+    }
+  }
+  return maxVecRel;
+}
+
+template <size_t nDim>
+void RunLsComparison(CGeometry& geometry, const CConfig& config, bool weighted, size_t nVar, size_t extraColumns,
+                     int idxVel, size_t extraGradVars, unsigned seed) {
+  REQUIRE(geometry.GetnDim() == nDim);
+  const size_t nPoint = geometry.GetnPoint(), nPointDomain = geometry.GetnPointDomain();
+
+  su2activematrix field(nPoint, nVar + extraColumns);
+  std::mt19937_64 gen(seed);
+  std::uniform_real_distribution<double> dist(-3.0, 7.0);
+  for (size_t iPoint = 0; iPoint < nPoint; ++iPoint)
+    for (size_t iVar = 0; iVar < field.cols(); ++iVar) field(iPoint, iVar) = dist(gen) * (1.0 + 1e3 * (iVar % 3 == 0));
+
+  const double sentinel = 12345.678;
+  const size_t nStore = nVar + extraGradVars;
+  C3DDoubleMatrix cpu(nPoint, nStore, nDim, sentinel);
+  C3DDoubleMatrix gpu(nPoint, nStore, nDim, sentinel);
+  C3DDoubleMatrix rMatrix(nPoint, nDim, nDim, 0.0);
+
+  /*--- No solver: no communications, and the whole gradient (solve and symmetry corrections) is computed. ---*/
+  computeGradientsLeastSquares(nullptr, MPI_QUANTITIES::SOLUTION, PERIODIC_NONE, geometry, config, weighted, field, 0,
+                               nVar, idxVel, cpu, rMatrix);
+
+  CFlowDeviceData data;
+  bool firstCall = false;
+  ls_gpu::ComputeGradientsLeastSquares(data, geometry.GetDevice(&config), weighted, field.data(), field.cols(),
+                                       gpu.data(), nStore, nVar, idxVel, 0, firstCall);
+  CHECK(firstCall);
+
+  double maxEntryRel = 0.0;
+  size_t nDiff = 0;
+  const double maxRel = LsMaxRelDiff<nDim>(geometry, nVar, cpu, gpu, maxEntryRel, nDiff);
+  const size_t nEntries = nPointDomain * nVar * nDim;
+  /*--- The variables that are stored but not computed keep their values. ---*/
+  for (size_t iPoint = 0; iPoint < nPoint; ++iPoint)
+    for (size_t iVar = nVar; iVar < nStore; ++iVar)
+      for (size_t iDim = 0; iDim < nDim; ++iDim) CHECK(gpu(iPoint, iVar, iDim) == sentinel);
+
+  std::cout << std::scientific << std::setprecision(3) << "LS GPU vs CPU (" << nDim << "D, " << (weighted ? "weighted" : "unweighted") << ", " << nVar
+            << " vars, idxVel " << idxVel << "): " << nDiff << " of " << nEntries
+            << " entries differ in bits, max relative difference per entry " << maxEntryRel
+            << ", relative to the vector norm " << maxRel << std::endl;
+  INFO("entries that differ: " << nDiff << " of " << nEntries << ", max relative difference " << maxRel);
+  CHECK(maxRel <= kLsTolerance);
+
+  /*--- Second call: nothing is uploaded again, same result. ---*/
+  const size_t up = data.BytesUploaded();
+  ls_gpu::ComputeGradientsLeastSquares(data, geometry.GetDevice(&config), weighted, field.data(), field.cols(),
+                                       gpu.data(), nStore, nVar, idxVel, 0, firstCall);
+  CHECK(!firstCall);
+  CHECK(data.BytesUploaded() == up);
+  CHECK(LsMaxRelDiff<nDim>(geometry, nVar, cpu, gpu, maxEntryRel, nDiff) <= kLsTolerance);
+}
+
+}  // namespace
+
+TEST_CASE("Least-squares gradient on the GPU matches the CPU (3D)", "[CUDA]") {
+  UnitQuadTestCase testCase;
+  testCase.config_options =
+      "SOLVER= EULER\n"
+      "MESH_FORMAT= BOX\n"
+      "INIT_OPTION= TD_CONDITIONS\n"
+      "MARKER_SYM= (x_minus, z_minus)\n"
+      "MARKER_EULER= (y_minus, x_plus)\n"
+      "MARKER_FAR= (y_plus, z_plus)\n"
+      "MESH_BOX_SIZE= 9,7,6\n"
+      "MESH_BOX_LENGTH= 2,1,1\n"
+      "MESH_BOX_OFFSET= 0,0,0\n";
+  testCase.InitConfig();
+  testCase.InitGeometry();
+  REQUIRE(testCase.geometry->GetnDim() == 3);
+  auto& g = *testCase.geometry;
+  auto& c = *testCase.config;
+
+  SECTION("unweighted, 1 scalar") { RunLsComparison<3>(g, c, false, 1, 0, -1, 0, 1); }
+  SECTION("weighted, 1 scalar") { RunLsComparison<3>(g, c, true, 1, 0, -1, 0, 2); }
+  SECTION("unweighted, 5 variables, velocity at 1") { RunLsComparison<3>(g, c, false, 5, 2, 1, 0, 3); }
+  SECTION("weighted, 5 variables, velocity at 1") { RunLsComparison<3>(g, c, true, 5, 2, 1, 0, 4); }
+  SECTION("weighted, 7 variables, velocity at 2") { RunLsComparison<3>(g, c, true, 7, 0, 2, 0, 5); }
+  SECTION("unweighted, 3 variables in a gradient that stores 5") { RunLsComparison<3>(g, c, false, 3, 2, 0, 2, 6); }
+  SECTION("weighted, 4 variables in a gradient that stores 7") { RunLsComparison<3>(g, c, true, 4, 1, 1, 3, 7); }
+}
+
+TEST_CASE("Least-squares gradient on the GPU matches the CPU (2D)", "[CUDA]") {
+  UnitQuadTestCase testCase;
+  testCase.config_options =
+      "SOLVER= EULER\n"
+      "MESH_FORMAT= RECTANGLE\n"
+      "INIT_OPTION= TD_CONDITIONS\n"
+      "MARKER_SYM= (x_minus)\n"
+      "MARKER_EULER= (y_minus)\n"
+      "MARKER_FAR= (x_plus, y_plus)\n"
+      "MESH_BOX_SIZE= 21,13,1\n"
+      "MESH_BOX_LENGTH= 2,1,1\n"
+      "MESH_BOX_OFFSET= 0,0,0\n";
+  testCase.InitConfig();
+  testCase.InitGeometry();
+  REQUIRE(testCase.geometry->GetnDim() == 2);
+  auto& g = *testCase.geometry;
+  auto& c = *testCase.config;
+
+  SECTION("unweighted, 1 scalar") { RunLsComparison<2>(g, c, false, 1, 0, -1, 0, 11); }
+  SECTION("weighted, 1 scalar") { RunLsComparison<2>(g, c, true, 1, 0, -1, 0, 12); }
+  SECTION("unweighted, 4 variables, velocity at 1") { RunLsComparison<2>(g, c, false, 4, 3, 1, 0, 13); }
+  SECTION("weighted, 4 variables, velocity at 1") { RunLsComparison<2>(g, c, true, 4, 3, 1, 0, 14); }
+  SECTION("weighted, 6 variables, velocity at 3") { RunLsComparison<2>(g, c, true, 6, 0, 3, 0, 15); }
+  SECTION("unweighted, 3 variables in a gradient that stores 4") { RunLsComparison<2>(g, c, false, 3, 5, 0, 1, 16); }
 }
 
 #endif  // SU2_ENABLE_GEOMETRY_DEVICE

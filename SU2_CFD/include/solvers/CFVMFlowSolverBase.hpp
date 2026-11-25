@@ -29,6 +29,7 @@
 #include "../../../Common/include/parallelization/omp_structure.hpp"
 #include "../../../Common/include/toolboxes/geometry_toolbox.hpp"
 #include "../gradients/computeGradientsGreenGaussGPU.hpp"
+#include "../gradients/computeGradientsLeastSquaresGPU.hpp"
 #include "CFlowDeviceData.hpp"
 #include "CSolver.hpp"
 
@@ -1110,6 +1111,15 @@ class CFVMFlowSolverBase : public CSolver {
    * \param[in] reconstruction - indicator that the gradient being computed is for upwind reconstruction.
    */
   void SetPrimitive_Gradient_LS(CGeometry* geometry, const CConfig* config, bool reconstruction = false) final;
+
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+  /*!
+   * \brief Least-squares gradient of the primitive variables on the GPU (CUDA_OFFLOAD= (GRADIENTS), finest grid).
+   * \note Kept out of SetPrimitive_Gradient_LS so that the CPU implementation is compiled as it was without the offload.
+   */
+  void SetPrimitive_Gradient_LS_Device(CGeometry* geometry, const CConfig* config, bool reconstruction,
+                                       bool weighted, MPI_QUANTITIES comm);
+#endif
 
   /*!
    * \brief Compute the limiter of the primitive variables.

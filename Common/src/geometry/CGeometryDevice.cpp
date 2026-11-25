@@ -72,6 +72,12 @@ void CGeometryDevice::Upload(const CGeometry& geometry, const CConfig& config) {
   Send(volume, &nodes->GetVolume(0), nPoint, "volume");
   Send(periodicVolume, &nodes->GetPeriodicVolume(0), nPoint, "periodicVolume");
 
+  const auto& coords = nodes->GetCoord();
+  if (coords.rows() < nPoint || coords.cols() != nDim) {
+    SU2_MPI::Error("The point coordinates of the geometry are not set up or are inconsistent.", CURRENT_FUNCTION);
+  }
+  Send(coord, coords.data(), nPoint * nDim, "coord");
+
   /*--- Point lists of the MPI halo exchange (finest grid, so the geometry has its point-to-point structure). ---*/
   halo.reset(new CDeviceHaloExchange(geometry));
   bytes += halo->GetBytes();
@@ -141,6 +147,8 @@ CGeometryDevice::View CGeometryDevice::GetGeomView() const {
   view.normalLd = nDim;
   view.volume = volume.DeviceRead();
   view.periodicVolume = periodicVolume.DeviceRead();
+  view.coord = coord.DeviceRead();
+  view.coordLd = nDim;
   return view;
 }
 
