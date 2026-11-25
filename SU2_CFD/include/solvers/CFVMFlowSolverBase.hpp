@@ -29,6 +29,7 @@
 #include "../../../Common/include/parallelization/omp_structure.hpp"
 #include "../../../Common/include/toolboxes/geometry_toolbox.hpp"
 #include "../gradients/computeGradientsGreenGaussGPU.hpp"
+#include "CFlowDeviceData.hpp"
 #include "CSolver.hpp"
 
 class CNumericsSIMD;
@@ -49,10 +50,27 @@ class CFVMFlowSolverBase : public CSolver {
   const typename VariableType::template CIndices<unsigned short> prim_idx;
 
 #ifdef SU2_ENABLE_GEOMETRY_DEVICE
-  /*!< \brief Device mirrors for the Green-Gauss gradients on the GPU (CUDA_OFFLOAD= GRADIENTS), created lazily.
-   * It is a member of this class, so it is destroyed before the host arrays it page-locks (owned by CSolver). */
-  std::unique_ptr<gg_gpu::GreenGaussDeviceData> ggDevice;
+  /*!< \brief Device mirrors of the primitives and gradients on the GPU (CUDA_OFFLOAD= GRADIENTS), created lazily
+   * by the first offloaded gradient. The mirrors page-lock arrays of the nodes, so they have to be released before
+   * the nodes are deleted: the destructor of this class resets the pointer first thing. */
+  std::unique_ptr<CFlowDeviceData> deviceData;
+
+  /*!< \brief Totals at the last ReportDeviceTransfers (CUDA_OFFLOAD_VERBOSE). */
+  size_t reportedBytesUp = 0, reportedBytesDown = 0, reportedNumUp = 0, reportedNumDown = 0;
 #endif
+
+  /*!
+   * \brief Declare that the CPU wrote the primitive variables of the finest grid: the device copy (if any) is
+   *        stale and is uploaded, once, by the next device consumer. Call it after every CPU write of the primitives
+   *        that can happen before an offloaded gradient. A no-op without offload and on the coarse grids (only the
+   *        finest grid has device data).
+   *        Threads: call it from one thread (inside SU2_OMP_MASTER or a safe global access block).
+   */
+  inline void MarkPrimitivesHostModified() {
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+    if (deviceData) deviceData->PrimitivesModified();
+#endif
+  }
 
   static constexpr size_t MAXNDIM = 3; /*!< \brief Max number of space dimensions, used in some static arrays. */
   static constexpr size_t MAXNVAR = VariableType::MAXNVAR; /*!< \brief Max number of variables, for static arrays. */
@@ -1044,6 +1062,11 @@ class CFVMFlowSolverBase : public CSolver {
   ~CFVMFlowSolverBase();
 
  public:
+
+  /*!
+   * \brief Print the CPU-GPU traffic since the last call (option CUDA_OFFLOAD_VERBOSE), see CSolver.
+   */
+  void ReportDeviceTransfers(const CConfig* config, unsigned long iter) override;
 
   /*!
    * \brief Set the new solution variables to the current solution value for classical RK.

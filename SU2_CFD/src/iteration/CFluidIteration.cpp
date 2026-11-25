@@ -112,6 +112,9 @@ void CFluidIteration::Iterate(COutput* output, CIntegration**** integration, CGe
         SetWind_GustField(config[val_iZone], geometry[val_iZone][val_iInst], solver[val_iZone][val_iInst]);
     }
   }
+
+  /*--- CPU-GPU traffic of the iteration (CUDA_OFFLOAD_VERBOSE), after the auxiliary solvers. ---*/
+  solver[val_iZone][val_iInst][MESH_0][FLOW_SOL]->ReportDeviceTransfers(config[val_iZone], InnerIter);
 }
 
 void CFluidIteration::CommonAuxiliarySolvers(CIntegration**** integration, CGeometry**** geometry,

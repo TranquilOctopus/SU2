@@ -38,8 +38,10 @@
 
 #include "../../../Common/include/containers/CDeviceMirror.hpp"
 #include "../../../Common/include/geometry/CGeometryDevice.hpp"
+#include "../solvers/CFlowDeviceData.hpp"
 
 namespace gg_gpu {
+
 
 /*!
  * @brief Compute the volume and boundary marker contributions of the Green-Gauss gradient at all domain points
@@ -62,20 +64,20 @@ void ComputeGreenGaussDomain(const CGeometryDevice& geometry, size_t nDim, const
                              const std::vector<char>& useMarker);
 
 /*!
- * @brief Device mirrors of the primitive variables and of the gradients (viscous and, if different,
- *        reconstruction) of one flow solver. Created lazily, owned by the solver.
- */
-struct GreenGaussDeviceData {
-  CDeviceMirror<su2double> primitives;
-  CDeviceMirror<su2double> gradient[2]; /*!< @brief [0] viscous gradient, [1] reconstruction gradient. */
-  std::vector<char> useMarker;
-};
-
-/*!
  * @brief Run the first part of the Green-Gauss gradient of the primitive variables on the GPU.
- * @details Uploads the primitives (all points), launches the kernels and downloads the gradient of the domain
- *          points, which is a contiguous prefix of the host array, so the halo rows are left alone. Must be called
- *          by a single thread (no OpenMP synchronization inside). The caller then runs the CPU part (second part).
+ * @details Launches the kernels and downloads the gradient of the domain points, which is a contiguous prefix of the
+ *          host array, so the halo rows are left alone. Must be called by a single thread (no OpenMP synchronization
+ *          inside). The caller then runs the CPU part (second part).
+ *
+ *          The primitives are NOT marked as modified here: the device copy is used as it is, and uploaded (once)
+ *          only if the mirror says that the host copy is the newer one. Whoever writes the host primitives has to
+ *          call data.PrimitivesModified() (the first call after the attachment uploads in any case).
+ *
+ *          When the gradient container stores more variables than are computed (nVarStore > nVarGrad), only the
+ *          computed variables of every row are downloaded: the others are never read by the kernels, and the host
+ *          values are the current ones (the CPU part has corrected them after an earlier call that computed them),
+ *          while the device values are the uncorrected ones, so downloading them would overwrite the corrections.
+ *          Therefore nothing is uploaded either.
  * @param[in,out] data - Mirrors, attached on the first call (and again if the host arrays moved).
  * @param[in] geometry - Finest grid.
  * @param[in] markerSkipped - One flag per marker, true for the markers that do not contribute (internal, etc.).
@@ -86,9 +88,9 @@ struct GreenGaussDeviceData {
  * @param[in] nVarGrad - Number of variables for which the gradient is computed (the first ones, at most nVarStore),
  *                       the others are not modified.
  * @param[in] which - 0 for the viscous gradient, 1 for the reconstruction gradient.
- * @param[in] firstCall - Set to true if the mirrors were created by this call (for messages).
+ * @param[out] firstCall - Set to true if the mirrors were created by this call (for messages).
  */
-inline void ComputeGradientsGreenGauss(GreenGaussDeviceData& data, const CGeometryDevice& geometry,
+inline void ComputeGradientsGreenGauss(CFlowDeviceData& data, const CGeometryDevice& geometry,
                                        const std::vector<char>& markerSkipped, const su2double* hostPrimitives,
                                        size_t nPrimVar, su2double* hostGradient, size_t nVarStore,
                                        size_t nVarGrad, int which, bool& firstCall) {
@@ -98,34 +100,44 @@ inline void ComputeGradientsGreenGauss(GreenGaussDeviceData& data, const CGeomet
   auto& grad = data.gradient[which];
   firstCall = false;
 
+  const bool firstOfAll = !prim.IsAttached() && !data.gradient[0].IsAttached() && !data.gradient[1].IsAttached();
+
   if (!prim.IsAttached() || prim.HostData() != hostPrimitives) {
-    prim.Attach(const_cast<su2double*>(hostPrimitives), nPoint * nPrimVar, "GG primitives");
+    data.Attach(prim, const_cast<su2double*>(hostPrimitives), nPoint * nPrimVar, "GG primitives");
     firstCall = true;
   }
   /*--- Only the domain points are attached: they come first in the storage, and the halo rows must keep the
    * values that are on the host (they are only overwritten by the MPI communication after this). ---*/
   if (!grad.IsAttached() || grad.HostData() != hostGradient) {
-    grad.Attach(hostGradient, nPointDomain * nVarStore * nDim, which ? "GG reconstruction gradient" : "GG gradient");
+    data.Attach(grad, hostGradient, nPointDomain * nVarStore * nDim,
+                which ? "GG reconstruction gradient" : "GG gradient");
     firstCall = true;
   }
 
   data.useMarker.resize(markerSkipped.size());
   for (size_t i = 0; i < markerSkipped.size(); ++i) data.useMarker[i] = !markerSkipped[i];
 
-  prim.HostModified();
-  prim.ToDevice();
-
-  /*--- Variables that are stored but not computed are copied back too, so they must be current on the device. ---*/
-  if (nVarStore != nVarGrad) {
-    grad.HostModified();
-    grad.ToDevice();
+  /*--- Warm-up: the first launch of the kernels is slow (module loading, first touch of the device buffers), so
+   * it is done once here, on the still uninitialized device buffers (the results are garbage and are overwritten
+   * by the real call below, the mirror states are not changed), instead of in the first timed call. ---*/
+  if (firstOfAll) {
+    ComputeGreenGaussDomain(geometry, nDim, prim.DeviceData(), nPrimVar, grad.DeviceData(), nVarStore, 0, nVarGrad,
+                            data.useMarker);
   }
+
+  /*--- A no-op if the device copy is current (the usual case: the gradient of the same iteration was computed
+   * before, or the solver uploaded it), see the description. ---*/
+  prim.ToDevice();
 
   ComputeGreenGaussDomain(geometry, nDim, prim.DeviceRead(), nPrimVar, grad.DeviceWrite(), nVarStore, 0, nVarGrad,
                           data.useMarker);
 
   grad.DeviceModified();
-  grad.ToHost();
+  if (nVarStore == nVarGrad) {
+    grad.ToHost();
+  } else {
+    grad.ToHostRowPrefix(nVarGrad * nDim, nVarStore * nDim);
+  }
 }
 
 }  // namespace gg_gpu

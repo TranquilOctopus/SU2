@@ -108,4 +108,6 @@ void CPBFluidIteration::Iterate(COutput* output, CIntegration**** integration, C
     END_SU2_OMP_PARALLEL
   }
 
+  /*--- CPU-GPU traffic of the iteration (CUDA_OFFLOAD_VERBOSE), after the auxiliary solvers. ---*/
+  solver[val_iZone][val_iInst][MESH_0][FLOW_SOL]->ReportDeviceTransfers(config[val_iZone], config[val_iZone]->GetInnerIter());
 }

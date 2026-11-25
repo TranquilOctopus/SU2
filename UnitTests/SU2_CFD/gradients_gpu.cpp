@@ -100,21 +100,36 @@ void RunComparison(CGeometry& geometry, const CConfig& config, size_t nVar, size
 
   detail::computeGradientsGreenGaussDomain<nDim>(geometry, config, field, 0, nVar, cpu);
 
-  gg_gpu::GreenGaussDeviceData data;
+  CFlowDeviceData data;
   bool firstCall = false;
   gg_gpu::ComputeGradientsGreenGauss(data, geometry.GetDevice(&config), SkippedMarkers(geometry, config),
                                      field.data(), field.cols(), gpu.data(), nStore, nVar, 0, firstCall);
   CHECK(firstCall);
+  const size_t bytesPrim = nPoint * field.cols() * sizeof(double);
+  const size_t bytesGrad = geometry.GetnPointDomain() * nStore * nDim * sizeof(double);
+  const size_t bytesComputed = geometry.GetnPointDomain() * nVar * nDim * sizeof(double);
+  CHECK(data.BytesUploaded() == bytesPrim);
+  /*--- Only the computed variables come back (the others keep the sentinel of the host, checked below). ---*/
+  CHECK(data.BytesDownloaded() == (extraGradVars ? bytesComputed : bytesGrad));
 
   CompareBitwise<nDim>(geometry, nStore, cpu, gpu, sentinel);
 
-  /*--- A second call (the values changed on the host) reuses the mirrors. ---*/
+  /*--- A second call without a change reuses the device primitives: nothing is uploaded. ---*/
+  gg_gpu::ComputeGradientsGreenGauss(data, geometry.GetDevice(&config), SkippedMarkers(geometry, config),
+                                     field.data(), field.cols(), gpu.data(), nStore, nVar, 0, firstCall);
+  CHECK(!firstCall);
+  CHECK(data.BytesUploaded() == bytesPrim);
+  CompareBitwise<nDim>(geometry, nStore, cpu, gpu, sentinel);
+
+  /*--- A third call (the values changed on the host, and the owner says so) uploads again. ---*/
   for (size_t iPoint = 0; iPoint < nPoint; ++iPoint) field(iPoint, 0) = dist(gen);
+  data.PrimitivesModified();
   detail::computeGradientsGreenGaussDomain<nDim>(geometry, config, field, 0, nVar, cpu);
   gg_gpu::ComputeGradientsGreenGauss(data, geometry.GetDevice(&config), SkippedMarkers(geometry, config),
                                      field.data(), field.cols(), gpu.data(), nStore, nVar, 0, firstCall);
   CHECK(!firstCall);
   CompareBitwise<nDim>(geometry, nStore, cpu, gpu, sentinel);
+  CHECK(data.BytesUploaded() == 2 * bytesPrim);
 }
 
 }  // namespace

@@ -372,12 +372,38 @@ template <class V, ENUM_REGIME R>
 CFVMFlowSolverBase<V, R>::~CFVMFlowSolverBase() {
   SU2_ZONE_SCOPED
 
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+  /*--- The device mirrors page-lock arrays of the nodes, release them first (a member is only destroyed after
+   * the body of the destructor, which deletes the nodes). ---*/
+  deviceData.reset();
+#endif
+
   for (auto& mat : SlidingState) {
     for (auto ptr : mat) delete [] ptr;
   }
 
   delete nodes;
   delete edgeNumerics;
+}
+
+template <class V, ENUM_REGIME R>
+void CFVMFlowSolverBase<V, R>::ReportDeviceTransfers(const CConfig* config, unsigned long iter) {
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+  if (!deviceData || !config->GetCUDA_Offload_Verbose()) return;
+
+  const size_t up = deviceData->BytesUploaded(), down = deviceData->BytesDownloaded();
+  const size_t nUp = deviceData->NumUploads(), nDown = deviceData->NumDownloads();
+
+  if (rank == MASTER_NODE) {
+    std::cout << "CUDA_OFFLOAD iteration " << iter << ": host to device " << (up - reportedBytesUp) / 1.0e6 << " MB ("
+              << nUp - reportedNumUp << " copies), device to host " << (down - reportedBytesDown) / 1.0e6 << " MB ("
+              << nDown - reportedNumDown << " copies)." << std::endl;
+  }
+  reportedBytesUp = up;
+  reportedBytesDown = down;
+  reportedNumUp = nUp;
+  reportedNumDown = nDown;
+#endif
 }
 
 template <class V, ENUM_REGIME R>
@@ -398,7 +424,7 @@ void CFVMFlowSolverBase<V, R>::SetPrimitive_Gradient_GG(CGeometry* geometry, con
      * barriers of the macros make the host data visible to it, and its results to all the threads. ---*/
     BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS {
       const auto& device = geometry->GetDevice(config);
-      if (!ggDevice) ggDevice.reset(new gg_gpu::GreenGaussDeviceData);
+      if (!deviceData) deviceData.reset(new CFlowDeviceData);
 
       /*--- Same selection of markers as in the CPU implementation. ---*/
       std::vector<char> skipped(geometry->GetnMarker());
@@ -410,7 +436,7 @@ void CFVMFlowSolverBase<V, R>::SetPrimitive_Gradient_GG(CGeometry* geometry, con
       bool firstCall = false;
       /*--- The gradient container may store more variables per point than are computed here (nPrimVarGrad
        * of the solver can be smaller than that of the container), its row length is gradient.rows(). ---*/
-      gg_gpu::ComputeGradientsGreenGauss(*ggDevice, device, skipped, primitives.data(), primitives.cols(),
+      gg_gpu::ComputeGradientsGreenGauss(*deviceData, device, skipped, primitives.data(), primitives.cols(),
                                          gradient.data(), gradient.rows(), nPrimVarGrad, reconstruction ? 1 : 0,
                                          firstCall);
       if (firstCall && rank == MASTER_NODE) {

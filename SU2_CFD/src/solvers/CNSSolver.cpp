@@ -1058,4 +1058,7 @@ void CNSSolver::SetTau_Wall_WF(CGeometry *geometry, CSolver **solver_container, 
     END_SU2_OMP_SAFE_GLOBAL_ACCESS
   }
 
+  /*--- The wall temperature of the points may have been written (aerodynamic heating), the device copy of the
+   * primitives (CUDA_OFFLOAD) is stale. ---*/
+  SU2_OMP_SAFE_GLOBAL_ACCESS(MarkPrimitivesHostModified();)
 }

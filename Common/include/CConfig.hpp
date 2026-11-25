@@ -136,6 +136,7 @@ private:
   Hold_GridFixed,           /*!< \brief Flag hold fixed some part of the mesh during the deformation. */
   Axisymmetric,             /*!< \brief Flag for axisymmetric calculations */
   Enable_Cuda,              /*!< \brief Flag for switching GPU computing*/
+  CUDA_Offload_Verbose,     /*!< \brief Flag for printing the CPU-GPU traffic of every iteration (CUDA_OFFLOAD_VERBOSE).*/
   Integrated_HeatFlux,      /*!< \brief Flag for heat flux BC whether it deals with integrated values.*/
   Pressure_Based;           /*!< \brief Flag to check if we are using a pressure-based system.*/
   su2double Buffet_k;       /*!< \brief Sharpness coefficient for buffet sensor.*/
@@ -6784,6 +6785,11 @@ public:
    * \return <code>TRUE</code> if cuda is enabled; otherwise <code>FALSE</code>.
    */
   bool GetCUDA(void) const { return Enable_Cuda; }
+
+  /*!
+   * \brief Whether to print the bytes copied between the CPU and the GPU in every iteration (CUDA_OFFLOAD_VERBOSE).
+   */
+  bool GetCUDA_Offload_Verbose() const { return CUDA_Offload_Verbose; }
 
   /*!
    * \brief Check whether a part of the solver is offloaded to the GPU (option CUDA_OFFLOAD).

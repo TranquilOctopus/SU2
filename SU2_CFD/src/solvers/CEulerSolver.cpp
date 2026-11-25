@@ -1657,6 +1657,11 @@ void CEulerSolver::CommonPreprocessing(CGeometry *geometry, CSolver **solver_con
       SetActDisk_BCThrust(geometry, solver_container, config, iMesh, Output);
     }
 
+    /*--- The primitives were written by the CPU (SetPrimitive_Variables), the device copy is uploaded by the
+     * first offloaded gradient that needs it (CUDA_OFFLOAD). Done after the operations above in case they
+     * write primitives. ---*/
+    MarkPrimitivesHostModified();
+
   }
   END_SU2_OMP_SAFE_GLOBAL_ACCESS
 

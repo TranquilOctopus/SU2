@@ -155,6 +155,39 @@ TEST_CASE("CDeviceMirror HostModified re-uploads", "[CUDA]") {
   CHECK(Peek(m.DeviceRead(), data.size()) == std::vector<double>(16, 5.0));
 }
 
+TEST_CASE("CDeviceMirror counts bytes and downloads row prefixes", "[CUDA]") {
+  const size_t nRow = 10, pitch = 6, width = 4, n = nRow * pitch;
+  std::vector<double> data(n, 1.0);
+  Mirror m(data.data(), n, "data");
+  CHECK(m.BytesUploaded() == 0);
+  CHECK(m.BytesDownloaded() == 0);
+
+  m.ToDevice();
+  m.ToDevice();
+  CHECK(m.BytesUploaded() == n * sizeof(double));
+
+  /*--- Nothing to download while the host copy is current. ---*/
+  m.ToHostRowPrefix(width, pitch);
+  CHECK(m.NumDownloads() == 0);
+
+  CDeviceMirrorTestDouble(m.DeviceWrite(), n);
+  for (auto& x : data) x = 100.0;
+  m.ToHostRowPrefix(width, pitch);
+  CHECK(m.NumDownloads() == 1);
+  CHECK(m.BytesDownloaded() == nRow * width * sizeof(double));
+  CHECK(m.State() == Valid::Device);
+  for (size_t i = 0; i < nRow; ++i)
+    for (size_t j = 0; j < pitch; ++j) CHECK(data[i * pitch + j] == (j < width ? 2.0 : 100.0));
+
+  /*--- Whole rows are the same as a full download. ---*/
+  m.ToHostRowPrefix(pitch, pitch);
+  for (auto x : data) CHECK(x == 2.0);
+  CHECK(m.BytesDownloaded() == (nRow * width + n) * sizeof(double));
+
+  CHECK_THROWS(m.ToHostRowPrefix(pitch + 1, pitch));
+  CHECK_THROWS(m.ToHostRowPrefix(1, 7));
+}
+
 TEST_CASE("CDeviceMirror memory management", "[CUDA]") {
   /*--- 64 MB mirrors: a leak per cycle would add up to many GB, which the (noisy, shared) free memory
    * query can reliably tell apart from other processes using the device. ---*/

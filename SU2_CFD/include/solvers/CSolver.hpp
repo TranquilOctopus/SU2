@@ -1526,6 +1526,15 @@ public:
   inline virtual void IdentifySolutionOutliers(const CConfig *config, unsigned long iter) { }
 
   /*!
+   * \brief Print the CPU-GPU traffic of the last iteration (option CUDA_OFFLOAD_VERBOSE), does nothing for the
+   *        solvers that do not offload anything. Called once per iteration, by the master thread, after the
+   *        whole iteration (including the auxiliary solvers) has run.
+   * \param[in] config - Definition of the particular problem.
+   * \param[in] iter - Current iteration (time, outer, or inner, as appropriate), only for the message.
+   */
+  inline virtual void ReportDeviceTransfers(const CConfig *config, unsigned long iter) { }
+
+  /*!
    * \brief Reset the local CFL adaption variables
    */
   void ResetCFLAdapt();

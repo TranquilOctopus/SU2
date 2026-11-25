@@ -1084,6 +1084,10 @@ void CIncEulerSolver::CommonPreprocessing(CGeometry *geometry, CSolver **solver_
 
   if (!pressure_based) SetBeta_Parameter(geometry, solver_container, config, iMesh);
 
+  /*--- The primitives were written by the CPU (SetPrimitive_Variables, SetBeta_Parameter), the device copy is
+   * uploaded by the first offloaded gradient that needs it (CUDA_OFFLOAD). ---*/
+  SU2_OMP_SAFE_GLOBAL_ACCESS(MarkPrimitivesHostModified();)
+
   /*--- Update the pressure range in the domain for target outflow mass flow rate. ---*/
 
   SetRangePressure(geometry, solver_container, config, iMesh);
@@ -2615,6 +2619,11 @@ void CIncEulerSolver::BC_Far_Field(CGeometry *geometry, CSolver **solver_contain
   }
   END_SU2_OMP_FOR
 
+  /*--- The pressure-based solver writes the pressure of the far-field points (SetPressure above), the device copy
+   * of the primitives (CUDA_OFFLOAD) is stale. ---*/
+  if (pressure_based) {
+    SU2_OMP_SAFE_GLOBAL_ACCESS(MarkPrimitivesHostModified();)
+  }
 }
 
 void CIncEulerSolver::BC_Inlet(CGeometry *geometry, CSolver **solver_container,
@@ -4070,6 +4079,9 @@ void CIncEulerSolver::ApplyPressureVelocityCorrection(CGeometry *geometry, CSolv
 
   }
   END_SU2_OMP_FOR
+
+  /*--- The primitives were written by the CPU, the device copy (CUDA_OFFLOAD) is stale. ---*/
+  SU2_OMP_SAFE_GLOBAL_ACCESS(MarkPrimitivesHostModified();)
 
   /*--- Add corrections to the edge velocities. Each edge accumulates only into its own slot,
   so partitioning by edge index is race-free. ---*/

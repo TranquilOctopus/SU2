@@ -99,6 +99,7 @@ class CDeviceMirror {
   bool pinned = false;     /*!< \brief Whether the host range is registered (page-locked) by this mirror. */
   std::string name;
   size_t nUp = 0, nDown = 0;  /*!< \brief Number of transfers performed, for diagnostics and tests. */
+  size_t bytesUp = 0, bytesDown = 0;  /*!< \brief Bytes moved by those transfers. */
 
   /*! \brief Report a stale access through the handler. */
   void Stale(const char* what) const {
@@ -146,6 +147,8 @@ class CDeviceMirror {
       name = std::move(other.name);
       nUp = other.nUp;
       nDown = other.nDown;
+      bytesUp = other.bytesUp;
+      bytesDown = other.bytesDown;
       other.host = nullptr;
       other.dev = nullptr;
       other.n = 0;
@@ -183,6 +186,7 @@ class CDeviceMirror {
     pinned = GPUMemoryAllocation::pinned_register(host, n * sizeof(T));
     state = Valid::Host;
     nUp = nDown = 0;
+    bytesUp = bytesDown = 0;
   }
 
   /*! \brief Release the device buffer and the page-locking, the mirror is detached afterwards. */
@@ -193,6 +197,7 @@ class CDeviceMirror {
     if (state != Valid::Host || dev == nullptr) return;
     gpuErrChk(cudaMemcpy(dev, host, n * sizeof(T), cudaMemcpyHostToDevice));
     ++nUp;
+    bytesUp += n * sizeof(T);
     state = Valid::Both;
   }
 
@@ -201,7 +206,30 @@ class CDeviceMirror {
     if (state != Valid::Device || dev == nullptr) return;
     gpuErrChk(cudaMemcpy(host, dev, n * sizeof(T), cudaMemcpyDeviceToHost));
     ++nDown;
+    bytesDown += n * sizeof(T);
     state = Valid::Both;
+  }
+
+  /*!
+   * \brief Download only the first elements of every row of the device data (the array is viewed as rows of
+   * rowPitch elements), the rest of every row on the host is not touched. Only if the device copy is the only
+   * current one. The state is left unchanged (Device): the mirror cannot say that some elements are current on both
+   * sides and the others only on the host, the owner of the data has to know which part it copied. Used to
+   * download the variables that a kernel computed out of rows that store more variables than the kernel computes.
+   * \param[in] rowWidth - Number of elements to copy from the start of every row, at most rowPitch.
+   * \param[in] rowPitch - Number of elements per row, the size of the mirror must be a multiple of it.
+   */
+  void ToHostRowPrefix(size_t rowWidth, size_t rowPitch) {
+    if (state != Valid::Device || dev == nullptr) return;
+    if (rowPitch == 0 || rowWidth > rowPitch || n % rowPitch != 0) {
+      throw std::invalid_argument("Invalid row layout for a partial download of device mirror '" + name + "'.");
+    }
+    const size_t nRow = n / rowPitch;
+    if (rowWidth == 0) return;
+    gpuErrChk(cudaMemcpy2D(host, rowPitch * sizeof(T), dev, rowPitch * sizeof(T), rowWidth * sizeof(T), nRow,
+                           cudaMemcpyDeviceToHost));
+    ++nDown;
+    bytesDown += nRow * rowWidth * sizeof(T);
   }
 
   /*! \brief Declare that the host data was written (call after CPU writes), the device copy is now stale. */
@@ -255,6 +283,10 @@ class CDeviceMirror {
   /*! \brief Number of host to device and device to host copies performed since the last Attach. */
   size_t NumUploads() const { return nUp; }
   size_t NumDownloads() const { return nDown; }
+
+  /*! \brief Bytes copied host to device and device to host since the last Attach. */
+  size_t BytesUploaded() const { return bytesUp; }
+  size_t BytesDownloaded() const { return bytesDown; }
 };
 
 #endif  // HAVE_CUDA

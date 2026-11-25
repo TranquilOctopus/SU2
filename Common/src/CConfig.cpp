@@ -1241,6 +1241,8 @@ void CConfig::SetConfig_Options() {
   addBoolOption("ENABLE_CUDA", Enable_Cuda, false);
   /*!\brief CUDA_OFFLOAD \n DESCRIPTION: Parts of the solver to run on the GPU (needs ENABLE_CUDA= YES). \n Options: see \link CUDA_Offload_Map \endlink \n DEFAULT: NONE \ingroup Config*/
   addEnumListOption("CUDA_OFFLOAD", nCUDA_Offload, CUDA_Offload, CUDA_Offload_Map);
+  /*!\brief CUDA_OFFLOAD_VERBOSE \n DESCRIPTION: Print the bytes copied between the CPU and the GPU in every iteration (rank 0, flow solver) \n DEFAULT: false \ingroup Config*/
+  addBoolOption("CUDA_OFFLOAD_VERBOSE", CUDA_Offload_Verbose, false);
   /* DESCRIPTION: Add the gravity force */
   addBoolOption("GRAVITY_FORCE", GravityForce, false);
   /* DESCRIPTION: Add the Vorticity Confinement term*/
