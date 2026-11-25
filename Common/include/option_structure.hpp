@@ -1275,6 +1275,16 @@ static const MapType<std::string, ROUGHSST_MODEL> RoughSST_Model_Map = {
 };
 
 /*!
+ * \brief Parts of the solver that can be offloaded to the GPU (option CUDA_OFFLOAD, needs ENABLE_CUDA= YES).
+ */
+enum class CUDA_OFFLOAD {
+  GRADIENTS, /*!< \brief Green-Gauss gradients of the primitive variables of the flow solvers. */
+};
+static const MapType<std::string, CUDA_OFFLOAD> CUDA_Offload_Map = {
+  MakePair("GRADIENTS", CUDA_OFFLOAD::GRADIENTS)
+};
+
+/*!
  * \brief SA Options
  */
 enum class SA_OPTIONS {

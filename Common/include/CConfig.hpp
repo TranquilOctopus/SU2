@@ -783,6 +783,8 @@ private:
 
   unsigned short nConfig_Files;       /*!< \brief Number of config files for multiphysics problems. */
   string *Config_Filenames;           /*!< \brief List of names for configuration files. */
+  CUDA_OFFLOAD *CUDA_Offload;         /*!< \brief List of the parts of the solver offloaded to the GPU (CUDA_OFFLOAD).*/
+  unsigned short nCUDA_Offload;       /*!< \brief Number of entries of CUDA_Offload. */
   SST_OPTIONS *SST_Options;           /*!< \brief List of modifications/corrections/versions of SST turbulence model.*/
   SA_OPTIONS *SA_Options;             /*!< \brief List of modifications/corrections/versions of SA turbulence model.*/
   LM_OPTIONS *LM_Options;             /*!< \brief List of modifications/corrections/versions of SA turbulence model.*/
@@ -6782,6 +6784,17 @@ public:
    * \return <code>TRUE</code> if cuda is enabled; otherwise <code>FALSE</code>.
    */
   bool GetCUDA(void) const { return Enable_Cuda; }
+
+  /*!
+   * \brief Check whether a part of the solver is offloaded to the GPU (option CUDA_OFFLOAD).
+   * \note Unsupported combinations with other options are rejected when the config is read.
+   * \param[in] what - The part of the solver.
+   */
+  bool GetCUDA_Offload(CUDA_OFFLOAD what) const {
+    for (unsigned short i = 0; i < nCUDA_Offload; ++i)
+      if (CUDA_Offload[i] == what) return true;
+    return false;
+  }
 
   /*!
    * \brief Subtract one to the index of the finest grid (full multigrid strategy).

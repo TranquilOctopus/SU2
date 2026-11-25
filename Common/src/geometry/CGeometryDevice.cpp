@@ -55,8 +55,12 @@ void CGeometryDevice::Upload(const CGeometry& geometry, const CConfig& config) {
   }
 
   const auto& normals = geometry.edges->GetNormal();
-  if (normals.rows() != nEdge || normals.cols() != nDim) {
-    SU2_MPI::Error("The edge normals of the geometry are not set up or are inconsistent.", CURRENT_FUNCTION);
+  /*--- The container may be padded with extra rows, only the first nEdge ones are used. ---*/
+  if (normals.rows() < nEdge || normals.cols() != nDim) {
+    SU2_MPI::Error("The edge normals of the geometry are not set up or are inconsistent (" + std::to_string(normals.rows()) +
+                       " x " + std::to_string(normals.cols()) + " normals, " + std::to_string(nEdge) + " edges, " +
+                       std::to_string(nDim) + " dimensions).",
+                   CURRENT_FUNCTION);
   }
 
   const size_t nNonZero = points.getNumNonZeros();

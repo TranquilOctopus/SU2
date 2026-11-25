@@ -28,6 +28,7 @@
 
 #include "../../../Common/include/parallelization/omp_structure.hpp"
 #include "../../../Common/include/toolboxes/geometry_toolbox.hpp"
+#include "../gradients/computeGradientsGreenGaussGPU.hpp"
 #include "CSolver.hpp"
 
 class CNumericsSIMD;
@@ -46,6 +47,12 @@ class CFVMFlowSolverBase : public CSolver {
  protected:
   /*!< \brief Object with indices of primitive variables. */
   const typename VariableType::template CIndices<unsigned short> prim_idx;
+
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+  /*!< \brief Device mirrors for the Green-Gauss gradients on the GPU (CUDA_OFFLOAD= GRADIENTS), created lazily.
+   * It is a member of this class, so it is destroyed before the host arrays it page-locks (owned by CSolver). */
+  std::unique_ptr<gg_gpu::GreenGaussDeviceData> ggDevice;
+#endif
 
   static constexpr size_t MAXNDIM = 3; /*!< \brief Max number of space dimensions, used in some static arrays. */
   static constexpr size_t MAXNVAR = VariableType::MAXNVAR; /*!< \brief Max number of variables, for static arrays. */

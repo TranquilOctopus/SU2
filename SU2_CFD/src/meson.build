@@ -195,6 +195,24 @@ su2_cfd_src += files(['iteration/CIteration.cpp',
 
 su2_cfd_src += files(['limiters/CLimiterDetails.cpp'])
 
+# The CUDA sources go into the primal library only (they need a trivially copyable su2double, see
+# SU2_ENABLE_GEOMETRY_DEVICE in code_config.hpp). nvcc takes only the defines out of su2_cpp_args.
+# computeGradientsGreenGaussGPU.cu must give bit-identical results to the CPU implementation of the same
+# gradient. The host build (-march=native -ffast-math) contracts "grad += flux * area" into FMAs, so this file is
+# compiled with FMA contraction on, explicitly (-fmad=false would not match the host). See the comments in the
+# file and the unit test, rerun it if the host compiler flags change.
+su2_cfd_cuda_src = []
+su2_cfd_cuda_args = []
+if get_option('enable-cuda')
+  su2_cfd_cuda_src += files(['gradients/computeGradientsGreenGaussGPU.cu'])
+  foreach arg : su2_cpp_args
+    if arg.startswith('-D') or arg.startswith('-U')
+      su2_cfd_cuda_args += arg
+    endif
+  endforeach
+  su2_cfd_cuda_args += '-fmad=true'
+endif
+
 profiling_args = []
 if get_option('enable-gprof')
   profiling_args = ['-pg','-no-pie']
@@ -207,10 +225,11 @@ if get_option('enable-normal')
     dependencies_default += cantera_dep
   endif
   su2_cfd_lib = static_library('SU2core',
-                               su2_cfd_src,
+                               su2_cfd_src, su2_cfd_cuda_src,
                                install : false,
 		               dependencies : dependencies_default,
-		               cpp_args:  [default_warning_flags, su2_cpp_args])
+		               cpp_args:  [default_warning_flags, su2_cpp_args],
+		               cuda_args: su2_cfd_cuda_args)
   su2_cfd_dep = declare_dependency(link_with: su2_cfd_lib,
                                    dependencies: get_option('enable-cantera') ? [cantera_dep] : [],
                                    include_directories: su2_cfd_include)

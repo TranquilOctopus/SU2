@@ -1239,6 +1239,8 @@ void CConfig::SetConfig_Options() {
   addBoolOption("AXISYMMETRIC", Axisymmetric, false);
   /*\brief ENABLE_CUDA \n DESCRIPTION: GPU Acceleration \n DEFAULT: false \ingroup Config */
   addBoolOption("ENABLE_CUDA", Enable_Cuda, false);
+  /*!\brief CUDA_OFFLOAD \n DESCRIPTION: Parts of the solver to run on the GPU (needs ENABLE_CUDA= YES). \n Options: see \link CUDA_Offload_Map \endlink \n DEFAULT: NONE \ingroup Config*/
+  addEnumListOption("CUDA_OFFLOAD", nCUDA_Offload, CUDA_Offload, CUDA_Offload_Map);
   /* DESCRIPTION: Add the gravity force */
   addBoolOption("GRAVITY_FORCE", GravityForce, false);
   /* DESCRIPTION: Add the Vorticity Confinement term*/
@@ -5925,6 +5927,40 @@ void CConfig::SetPostprocessing(SU2_COMPONENT val_software, unsigned short val_i
     SU2_MPI::Error(string("LEAST_SQUARES gradient method not allowed for viscous / source terms.\n") +
                    string("Please select either WEIGHTED_LEAST_SQUARES or GREEN_GAUSS."),
                    CURRENT_FUNCTION);
+  }
+
+  /*--- Offloading of the Green-Gauss gradients to the GPU. Every requirement that is not met is an error, there
+   * is no silent fallback to the CPU. ---*/
+
+  if (GetCUDA_Offload(CUDA_OFFLOAD::GRADIENTS)) {
+    string reason;
+    if (!Enable_Cuda) {
+      reason = "ENABLE_CUDA= YES is required.";
+    }
+#ifndef SU2_ENABLE_GEOMETRY_DEVICE
+    else {
+      reason = "this build has no CUDA kernels for it (they are only built into the primal solver, with -Denable-cuda=true).";
+    }
+#else
+    else if (Kind_Gradient_Method != GREEN_GAUSS && Kind_Gradient_Method_Recon != GREEN_GAUSS) {
+      reason = "NUM_METHOD_GRAD or NUM_METHOD_GRAD_RECON must be GREEN_GAUSS (least squares gradients are not offloaded).";
+    } else if (nMarker_PerBound > 0) {
+      reason = "periodic markers are not supported.";
+    } else if (GetGrid_Movement() || Deform_Mesh) {
+      reason = "grid movement and mesh deformation are not supported.";
+    } else {
+      switch (Kind_Solver) {
+        case MAIN_SOLVER::EULER: case MAIN_SOLVER::NAVIER_STOKES: case MAIN_SOLVER::RANS:
+        case MAIN_SOLVER::INC_EULER: case MAIN_SOLVER::INC_NAVIER_STOKES: case MAIN_SOLVER::INC_RANS:
+          break;
+        default:
+          reason = "only the compressible and incompressible Euler, Navier-Stokes and RANS solvers are supported.";
+      }
+    }
+#endif
+    if (!reason.empty()) {
+      SU2_MPI::Error("CUDA_OFFLOAD= (GRADIENTS) is not available: " + reason, CURRENT_FUNCTION);
+    }
   }
 
   /* Protect against using CFL adaption for non-flow or certain

@@ -83,30 +83,23 @@ inline auto makeGreenGaussGeomView(const CGeometry& geometry) {
 }
 
 /*!
- * \brief Compute the gradient of a field using the Green-Gauss theorem.
+ * \brief First part of the Green-Gauss gradient: the volume (edge) and boundary marker contributions at all
+ *        domain points. Halo points, symmetry corrections, periodic and MPI communications are not handled,
+ *        see computeGradientsGreenGaussFinish. This is the part that can run on the GPU.
  * \ingroup FvmAlgos
  * \note Template nDim to allow efficient unrolling of inner loops.
  * \note Gradients can be computed only for a contiguous range of variables, defined
  *       by [varBegin, varEnd[ (e.g. 0,1 computes the gradient of the 1st variable).
- *       This can be used, for example, to compute only velocity gradients.
- * \note The function uses an optional solver object to perform communications, if
- *       none (nullptr) is provided the function does not fail (the objective of
- *       this is to improve test-ability).
- * \param[in] solver - Optional, solver associated with the field (used only for MPI).
- * \param[in] kindMpiComm - Type of MPI communication required.
- * \param[in] kindPeriodicComm - Type of periodic communication required.
  * \param[in] geometry - Geometric grid properties.
  * \param[in] config - Configuration of the problem, used to identify types of boundaries.
  * \param[in] field - Generic object implementing operator (iPoint, iVar).
  * \param[in] varBegin - Index of first variable for which to compute the gradient.
  * \param[in] varEnd - Index of last variable for which to compute the gradient.
- * \param[in] idxVel - Index of velocity, or -1 if no velocity present.
  * \param[out] gradient - Generic object implementing operator (iPoint, iVar, iDim).
  */
 template <size_t nDim, class FieldType, class GradientType>
-void computeGradientsGreenGauss(CSolver* solver, MPI_QUANTITIES kindMpiComm, PERIODIC_QUANTITIES kindPeriodicComm,
-                                CGeometry& geometry, const CConfig& config, const FieldType& field,
-                                const size_t varBegin, const size_t varEnd, const int idxVel, GradientType& gradient) {
+void computeGradientsGreenGaussDomain(CGeometry& geometry, const CConfig& config, const FieldType& field,
+                                      const size_t varBegin, const size_t varEnd, GradientType& gradient) {
   const size_t nPointDomain = geometry.GetnPointDomain();
 
 #ifdef HAVE_OMP
@@ -161,8 +154,27 @@ void computeGradientsGreenGauss(CSolver* solver, MPI_QUANTITIES kindMpiComm, PER
       END_SU2_OMP_FOR
     } //found right marker
   } // iMarkers
+}
 
-
+/*!
+ * \brief Second part of the Green-Gauss gradient: corrections for symmetry planes and Euler walls, periodic
+ *        contributions and the MPI communications (always on the CPU).
+ * \ingroup FvmAlgos
+ * \param[in] solver - Optional, solver associated with the field (used only for MPI).
+ * \param[in] kindMpiComm - Type of MPI communication required.
+ * \param[in] kindPeriodicComm - Type of periodic communication required.
+ * \param[in] geometry - Geometric grid properties.
+ * \param[in] config - Configuration of the problem, used to identify types of boundaries.
+ * \param[in] varBegin - Index of first variable for which the gradient was computed.
+ * \param[in] varEnd - Index of last variable for which the gradient was computed.
+ * \param[in] idxVel - Index of velocity, or -1 if no velocity present.
+ * \param[in,out] gradient - Generic object implementing operator (iPoint, iVar, iDim).
+ */
+template <size_t nDim, class GradientType>
+void computeGradientsGreenGaussFinish(CSolver* solver, MPI_QUANTITIES kindMpiComm,
+                                      PERIODIC_QUANTITIES kindPeriodicComm, CGeometry& geometry,
+                                      const CConfig& config, const size_t varBegin, const size_t varEnd,
+                                      const int idxVel, GradientType& gradient) {
   /*--- Compute the corrections for symmetry planes and Euler walls. ---*/
 
   correctGradientsSymmetry<nDim>(geometry, config, varBegin, varEnd, idxVel, gradient);
@@ -182,6 +194,33 @@ void computeGradientsGreenGauss(CSolver* solver, MPI_QUANTITIES kindMpiComm, PER
 
   solver->InitiateComms(&geometry, &config, kindMpiComm);
   solver->CompleteComms(&geometry, &config, kindMpiComm);
+}
+
+/*!
+ * \brief Compute the gradient of a field using the Green-Gauss theorem (both parts, on the CPU).
+ * \ingroup FvmAlgos
+ * \note See computeGradientsGreenGaussDomain and computeGradientsGreenGaussFinish for the two parts.
+ * \note The function uses an optional solver object to perform communications, if
+ *       none (nullptr) is provided the function does not fail (the objective of
+ *       this is to improve test-ability).
+ * \param[in] solver - Optional, solver associated with the field (used only for MPI).
+ * \param[in] kindMpiComm - Type of MPI communication required.
+ * \param[in] kindPeriodicComm - Type of periodic communication required.
+ * \param[in] geometry - Geometric grid properties.
+ * \param[in] config - Configuration of the problem, used to identify types of boundaries.
+ * \param[in] field - Generic object implementing operator (iPoint, iVar).
+ * \param[in] varBegin - Index of first variable for which to compute the gradient.
+ * \param[in] varEnd - Index of last variable for which to compute the gradient.
+ * \param[in] idxVel - Index of velocity, or -1 if no velocity present.
+ * \param[out] gradient - Generic object implementing operator (iPoint, iVar, iDim).
+ */
+template <size_t nDim, class FieldType, class GradientType>
+void computeGradientsGreenGauss(CSolver* solver, MPI_QUANTITIES kindMpiComm, PERIODIC_QUANTITIES kindPeriodicComm,
+                                CGeometry& geometry, const CConfig& config, const FieldType& field,
+                                const size_t varBegin, const size_t varEnd, const int idxVel, GradientType& gradient) {
+  computeGradientsGreenGaussDomain<nDim>(geometry, config, field, varBegin, varEnd, gradient);
+  computeGradientsGreenGaussFinish<nDim>(solver, kindMpiComm, kindPeriodicComm, geometry, config, varBegin, varEnd,
+                                         idxVel, gradient);
 }
 }  // namespace detail
 
@@ -203,6 +242,30 @@ void computeGradientsGreenGauss(CSolver* solver, MPI_QUANTITIES kindMpiComm, PER
     case 3:
       detail::computeGradientsGreenGauss<3>(solver, kindMpiComm, kindPeriodicComm, geometry, config, field, varBegin,
                                             varEnd, idxVel, gradient);
+      break;
+    default:
+      SU2_MPI::Error("Too many dimensions to compute gradients.", CURRENT_FUNCTION);
+      break;
+  }
+}
+
+/*!
+ * \brief Second part of the Green-Gauss gradient for a runtime number of dimensions, see
+ *        detail::computeGradientsGreenGaussFinish. For use after the first part was computed elsewhere (the GPU).
+ */
+template <class GradientType>
+void computeGradientsGreenGaussFinish(CSolver* solver, MPI_QUANTITIES kindMpiComm,
+                                      PERIODIC_QUANTITIES kindPeriodicComm, CGeometry& geometry,
+                                      const CConfig& config, const size_t varBegin, const size_t varEnd,
+                                      const int idxVel, GradientType& gradient) {
+  switch (geometry.GetnDim()) {
+    case 2:
+      detail::computeGradientsGreenGaussFinish<2>(solver, kindMpiComm, kindPeriodicComm, geometry, config, varBegin,
+                                                  varEnd, idxVel, gradient);
+      break;
+    case 3:
+      detail::computeGradientsGreenGaussFinish<3>(solver, kindMpiComm, kindPeriodicComm, geometry, config, varBegin,
+                                                  varEnd, idxVel, gradient);
       break;
     default:
       SU2_MPI::Error("Too many dimensions to compute gradients.", CURRENT_FUNCTION);
