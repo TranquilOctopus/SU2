@@ -28,6 +28,20 @@
 
  #pragma once
 
+#include "../../../Common/include/code_config.hpp"
+#include "../../../Common/include/option_structure.hpp"
+#include "../gradients/greenGaussPoint.hpp"
+
+/*--- The functions that run on the GPU (limiterFunction, geometricFactor of the kinds that are offloaded, and the
+ * small functions of LimiterHelpers) are marked SU2_HOST_DEVICE and are shared between the CPU and the CUDA
+ * kernels (see limiterPoint.hpp). The nvcc compilation of the kernels includes this file without the host
+ * infrastructure (CGeometry, CConfig, MPI, OpenMP), everything that needs it (the "preprocess" functions, the
+ * global values of Venkatakrishnan-Wang, the kinds that are not offloaded) is excluded with __CUDACC__. ---*/
+
+/*! \brief Maximum number of variables of the work arrays of the limiters (also the size of the per-variable
+ *         parameters stored in the details classes, so that the classes can be passed to a kernel by value). */
+constexpr size_t LIMITER_MAX_NVAR = 32;
+
 /*!
  * \brief A traits class for limiters, see notes for "computeLimiters_impl()".
  * \ingroup FvmAlgos
@@ -57,8 +71,10 @@ struct CLimiterDetails
    *        gradient projections onto the edges, and the deltas over direct neighbors.
    *        Both proj and delta may be 0.0, beware of divisions.
    * \note This function is called twice (min/max) per point per variable
-   *       (also inside an AD pre-accumulation region).
+   *       (also inside an AD pre-accumulation region), the template parameter is the
+   *       preaccumulation policy (see gg::NoPreacc) through which new inputs are registered.
    */
+  template<class Preacc>
   inline su2double limiterFunction(size_t iVar, su2double proj, su2double delta) const;
 };
 
@@ -74,7 +90,7 @@ struct LimiterHelpers
 
   /*! \brief MUSCL reconstruction increment using the displacement to the middle of an edge. */
   template <class Int>
-  FORCEINLINE static Type reconstructionIncrement(Int nDim, const Type* halfEdge, const Type* gradient,
+  SU2_HOST_DEVICE FORCEINLINE static Type reconstructionIncrement(Int nDim, const Type* halfEdge, const Type* gradient,
                                                   const Type& value_i, const Type& value_j, const Type& kappa) {
     Type proj = 0.0;
     for (Int iDim = 0; iDim < nDim; ++iDim) proj += halfEdge[iDim] * gradient[iDim];
@@ -82,7 +98,7 @@ struct LimiterHelpers
     return umusclProjection(proj, cent, kappa);
   }
 
-  FORCEINLINE static Type umusclProjection(const Type& grad_proj, const Type& delta, const Type& kappa)
+  SU2_HOST_DEVICE FORCEINLINE static Type umusclProjection(const Type& grad_proj, const Type& delta, const Type& kappa)
   {
     /*-------------------------------------------------------------------*/
     /*--- The MUSCL kappa-scheme reconstruction is typically written: ---*/
@@ -98,7 +114,7 @@ struct LimiterHelpers
     return (1.0 - kappa) * upw + (1.0 + kappa) * cent;
   }
 
-  FORCEINLINE static Type venkatFunction(const Type& proj, const Type& delta, const Type& eps2)
+  SU2_HOST_DEVICE FORCEINLINE static Type venkatFunction(const Type& proj, const Type& delta, const Type& eps2)
   {
     Type y = delta*(delta+proj) + eps2;
     return (y + delta*proj) / (y + 2*proj*proj);
@@ -115,7 +131,7 @@ struct LimiterHelpers
     return max(0.0, min(factor, 1.0));
   }
 
-  FORCEINLINE static Type r3Function(const Type& proj, const Type& delta, const Type& epsp)
+  SU2_HOST_DEVICE FORCEINLINE static Type r3Function(const Type& proj, const Type& delta, const Type& epsp)
   {
     Type Dp = fabs(delta);
     Type Dm = fabs(proj);
@@ -125,7 +141,7 @@ struct LimiterHelpers
     return (y + Dp*S3) / (y + Dm*(delta*delta+S3));
   }
 
-  FORCEINLINE static Type r4Function(const Type& proj, const Type& delta, const Type& epsp)
+  SU2_HOST_DEVICE FORCEINLINE static Type r4Function(const Type& proj, const Type& delta, const Type& epsp)
   {
     Type Dp = fabs(delta);
     Type Dm = fabs(proj);
@@ -135,7 +151,7 @@ struct LimiterHelpers
     return (y + Dp*S4) / (y + Dm*(pow(delta,3)+S4));
   }
 
-  FORCEINLINE static Type r5Function(const Type& proj, const Type& delta, const Type& epsp)
+  SU2_HOST_DEVICE FORCEINLINE static Type r5Function(const Type& proj, const Type& delta, const Type& epsp)
   {
     Type Dp = fabs(delta);
     Type Dm = fabs(proj);
@@ -159,19 +175,22 @@ struct CLimiterDetails<LIMITER::BARTH_JESPERSEN>
   /*!
    * \brief Set a small epsilon to avoid divisions by 0.
    */
+#ifndef __CUDACC__
   template<class... Ts>
   inline void preprocess(Ts&...) {eps2 = LimiterHelpers<>::epsilon();}
+#endif
 
   /*!
    * \brief No geometric modification for this kind of limiter.
    */
   template<class... Ts>
-  inline su2double geometricFactor(Ts&...) const {return 1.0;}
+  SU2_HOST_DEVICE inline su2double geometricFactor(Ts&...) const {return 1.0;}
 
   /*!
    * \brief Venkatakrishnan function with a numerical epsilon.
    */
-  inline su2double limiterFunction(size_t, su2double proj, su2double delta) const
+  template<class Preacc>
+  SU2_HOST_DEVICE inline su2double limiterFunction(size_t, su2double proj, su2double delta) const
   {
     return LimiterHelpers<>::venkatFunction(proj, delta, eps2);
   }
@@ -191,6 +210,7 @@ struct CLimiterDetails<LIMITER::VENKATAKRISHNAN>
    * \brief Store the reference lenght based eps^2 parameter,
    *        limited to a small number to avoid divisions by 0.
    */
+#ifndef __CUDACC__
   template<class... Ts>
   inline void preprocess(CGeometry&, const CConfig& config, Ts&...)
   {
@@ -199,17 +219,19 @@ struct CLimiterDetails<LIMITER::VENKATAKRISHNAN>
     su2double eps1 = fabs(L*K);
     eps2 = max(eps1*eps1*eps1, LimiterHelpers<>::epsilon());
   }
+#endif
 
   /*!
    * \brief No geometric modification for this kind of limiter.
    */
   template<class... Ts>
-  inline su2double geometricFactor(Ts&...) const {return 1.0;}
+  SU2_HOST_DEVICE inline su2double geometricFactor(Ts&...) const {return 1.0;}
 
   /*!
    * \brief Smooth function that disables limiting in smooth regions.
    */
-  inline su2double limiterFunction(size_t, su2double proj, su2double delta) const
+  template<class Preacc>
+  SU2_HOST_DEVICE inline su2double limiterFunction(size_t, su2double proj, su2double delta) const
   {
     return LimiterHelpers<>::venkatFunction(proj, delta, eps2);
   }
@@ -229,6 +251,7 @@ struct CLimiterDetails<LIMITER::NISHIKAWA_R3>
    * \brief Store the reference lenght based eps^3 parameter,
    *        limited to a small number to avoid divisions by 0.
    */
+#ifndef __CUDACC__
   template<class... Ts>
   inline void preprocess(CGeometry&, const CConfig& config, Ts&...)
   {
@@ -237,17 +260,19 @@ struct CLimiterDetails<LIMITER::NISHIKAWA_R3>
     su2double eps1 = fabs(L*K);
     epsp = max(pow(eps1, 4), LimiterHelpers<>::epsilon());
   }
+#endif
 
   /*!
    * \brief No geometric modification for this kind of limiter.
    */
   template<class... Ts>
-  inline su2double geometricFactor(Ts&...) const {return 1.0;}
+  SU2_HOST_DEVICE inline su2double geometricFactor(Ts&...) const {return 1.0;}
 
   /*!
    * \brief Smooth function that disables limiting in smooth regions.
    */
-  inline su2double limiterFunction(size_t, su2double proj, su2double delta) const
+  template<class Preacc>
+  SU2_HOST_DEVICE inline su2double limiterFunction(size_t, su2double proj, su2double delta) const
   {
     return LimiterHelpers<>::r3Function(proj, delta, epsp);
   }
@@ -267,6 +292,7 @@ struct CLimiterDetails<LIMITER::NISHIKAWA_R4>
    * \brief Store the reference lenght based eps^4 parameter,
    *        limited to a small number to avoid divisions by 0.
    */
+#ifndef __CUDACC__
   template<class... Ts>
   inline void preprocess(CGeometry&, const CConfig& config, Ts&...)
   {
@@ -275,17 +301,19 @@ struct CLimiterDetails<LIMITER::NISHIKAWA_R4>
     su2double eps1 = fabs(L*K);
     epsp = max(pow(eps1, 5), LimiterHelpers<>::epsilon());
   }
+#endif
 
   /*!
    * \brief No geometric modification for this kind of limiter.
    */
   template<class... Ts>
-  inline su2double geometricFactor(Ts&...) const {return 1.0;}
+  SU2_HOST_DEVICE inline su2double geometricFactor(Ts&...) const {return 1.0;}
 
   /*!
    * \brief Smooth function that disables limiting in smooth regions.
    */
-  inline su2double limiterFunction(size_t, su2double proj, su2double delta) const
+  template<class Preacc>
+  SU2_HOST_DEVICE inline su2double limiterFunction(size_t, su2double proj, su2double delta) const
   {
     return LimiterHelpers<>::r4Function(proj, delta, epsp);
   }
@@ -305,6 +333,7 @@ struct CLimiterDetails<LIMITER::NISHIKAWA_R5>
    * \brief Store the reference lenght based eps^5 parameter,
    *        limited to a small number to avoid divisions by 0.
    */
+#ifndef __CUDACC__
   template<class... Ts>
   inline void preprocess(CGeometry&, const CConfig& config, Ts&...)
   {
@@ -313,17 +342,19 @@ struct CLimiterDetails<LIMITER::NISHIKAWA_R5>
     su2double eps1 = fabs(L*K);
     epsp = max(pow(eps1, 6), LimiterHelpers<>::epsilon());
   }
+#endif
 
   /*!
    * \brief No geometric modification for this kind of limiter.
    */
   template<class... Ts>
-  inline su2double geometricFactor(Ts&...) const {return 1.0;}
+  SU2_HOST_DEVICE inline su2double geometricFactor(Ts&...) const {return 1.0;}
 
   /*!
    * \brief Smooth function that disables limiting in smooth regions.
    */
-  inline su2double limiterFunction(size_t, su2double proj, su2double delta) const
+  template<class Preacc>
+  SU2_HOST_DEVICE inline su2double limiterFunction(size_t, su2double proj, su2double delta) const
   {
     return LimiterHelpers<>::r5Function(proj, delta, epsp);
   }
@@ -332,13 +363,17 @@ struct CLimiterDetails<LIMITER::NISHIKAWA_R5>
 /*!
  * \brief Venkatakrishnan-Wang specialization.
  * \ingroup FvmAlgos
+ * \note eps2 is a plain array (not a container) so that the object can be copied to a kernel.
  */
 template<>
 struct CLimiterDetails<LIMITER::VENKATAKRISHNAN_WANG>
 {
+#ifndef __CUDACC__
   static su2activevector sharedMin, sharedMax;
-  su2activevector eps2;
+#endif
+  su2double eps2[LIMITER_MAX_NVAR];
 
+#ifndef __CUDACC__
   /*!
    * \brief Store the solution range based eps^2 parameter.
    */
@@ -399,32 +434,48 @@ struct CLimiterDetails<LIMITER::VENKATAKRISHNAN_WANG>
 
     /*--- Compute eps^2 (each thread has its own copy of it). ---*/
 
-    eps2.resize(varEnd);
+    setEps2(config, varBegin, varEnd, sharedMin, sharedMax);
+  }
+
+  /*!
+   * \brief Compute eps^2 from the global (all ranks) minimum and maximum of each variable, the last step of
+   *        "preprocess", also used when the extrema come from the GPU.
+   * \param[in] globalMin - Object implementing operator() (iVar).
+   * \param[in] globalMax - As above, maximum.
+   */
+  template<class Vector>
+  inline void setEps2(const CConfig& config, size_t varBegin, size_t varEnd,
+                      const Vector& globalMin, const Vector& globalMax)
+  {
     su2double K = config.GetVenkat_LimiterCoeff();
 
     for(size_t iVar = varBegin; iVar < varEnd; ++iVar)
     {
-      su2double range = sharedMax(iVar) - sharedMin(iVar);
-      eps2(iVar) = max(pow(K*range, 2), LimiterHelpers<>::epsilon());
+      su2double range = globalMax(iVar) - globalMin(iVar);
+      eps2[iVar] = max(pow(K*range, 2), LimiterHelpers<>::epsilon());
     }
   }
+#endif
 
   /*!
    * \brief No geometric modification for this kind of limiter.
    */
   template<class... Ts>
-  inline su2double geometricFactor(Ts&...) const {return 1.0;}
+  SU2_HOST_DEVICE inline su2double geometricFactor(Ts&...) const {return 1.0;}
 
   /*!
    * \brief Smooth function that disables limiting in smooth regions.
    */
-  inline su2double limiterFunction(size_t iVar, su2double proj, su2double delta) const
+  template<class Preacc>
+  SU2_HOST_DEVICE inline su2double limiterFunction(size_t iVar, su2double proj, su2double delta) const
   {
-    AD::SetPreaccIn(eps2(iVar));
-    return LimiterHelpers<>::venkatFunction(proj, delta, eps2(iVar));
+    Preacc::In(eps2[iVar]);
+    return LimiterHelpers<>::venkatFunction(proj, delta, eps2[iVar]);
   }
 };
 
+
+#ifndef __CUDACC__
 
 /*!
  * \brief Venkatakrishnan with sharp edge modification.
@@ -461,6 +512,7 @@ struct CLimiterDetails<LIMITER::SHARP_EDGES>
   /*!
    * \brief Smooth function that disables limiting in smooth regions.
    */
+  template<class Preacc>
   inline su2double limiterFunction(size_t, su2double proj, su2double delta) const
   {
     return LimiterHelpers<>::venkatFunction(proj, delta, eps2);
@@ -503,8 +555,11 @@ struct CLimiterDetails<LIMITER::WALL_DISTANCE>
   /*!
    * \brief Smooth function that disables limiting in smooth regions.
    */
+  template<class Preacc>
   inline su2double limiterFunction(size_t, su2double proj, su2double delta) const
   {
     return LimiterHelpers<>::venkatFunction(proj, delta, eps2);
   }
 };
+
+#endif  // __CUDACC__

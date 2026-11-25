@@ -5963,6 +5963,38 @@ void CConfig::SetPostprocessing(SU2_COMPONENT val_software, unsigned short val_i
     }
   }
 
+  /*--- Offloading of the slope limiters of the primitive variables of the flow solvers. They read the reconstruction
+   * gradient from the device, so the gradients must be offloaded too (this also brings the requirements of that
+   * option: no periodic markers, no grid movement, supported solvers, CUDA build). The limiters that are not
+   * implemented on the GPU are an error, there is no silent fallback to the CPU. ---*/
+
+  if (GetCUDA_Offload(CUDA_OFFLOAD::LIMITERS)) {
+    if (!GetCUDA_Offload(CUDA_OFFLOAD::GRADIENTS)) {
+      SU2_MPI::Error("CUDA_OFFLOAD= (LIMITERS) is not available: it requires CUDA_OFFLOAD= (GRADIENTS, LIMITERS), "
+                     "because the limiters read the gradient from the GPU.", CURRENT_FUNCTION);
+    }
+    string name;
+    switch (Kind_SlopeLimit_Flow) {
+      case LIMITER::NONE:
+      case LIMITER::BARTH_JESPERSEN:
+      case LIMITER::VENKATAKRISHNAN:
+      case LIMITER::NISHIKAWA_R3:
+      case LIMITER::NISHIKAWA_R4:
+      case LIMITER::NISHIKAWA_R5:
+      case LIMITER::VENKATAKRISHNAN_WANG:
+        break;
+      case LIMITER::WALL_DISTANCE: name = "WALL_DISTANCE"; break;
+      case LIMITER::SHARP_EDGES: name = "SHARP_EDGES"; break;
+      case LIMITER::VAN_ALBADA_EDGE: name = "VAN_ALBADA_EDGE"; break;
+      default: name = "the selected"; break;
+    }
+    if (!name.empty()) {
+      SU2_MPI::Error("CUDA_OFFLOAD= (LIMITERS) is not available: the " + name + " slope limiter (SLOPE_LIMITER_FLOW) "
+                     "is not implemented on the GPU. Supported: BARTH_JESPERSEN, VENKATAKRISHNAN, NISHIKAWA_R3, "
+                     "NISHIKAWA_R4, NISHIKAWA_R5, VENKATAKRISHNAN_WANG.", CURRENT_FUNCTION);
+    }
+  }
+
   /* Protect against using CFL adaption for non-flow or certain
    unsteady flow problems. */
 

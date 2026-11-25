@@ -53,14 +53,19 @@
  *            (CDeviceHaloExchange), so the device copy is the final gradient. Only the variables computed by the
  *            call are downloaded (all rows), the variables that a call does not compute are neither uploaded nor
  *            downloaded, they only live on the host (see ComputeGradientsGreenGauss).
- *          - limiter, solutionMin, solutionMax, rMatrix: reserved for later steps, never attached yet.
+ *          - limiter: written by the limiter kernels (all the rows: the domain rows are computed and the halo rows
+ *            received by the device halo exchange, like the gradients), downloaded once after the exchange. It is
+ *            read only by the host. solutionMin, solutionMax, rMatrix: reserved, never attached (the limiter on the
+ *            GPU does not store the min/max over the neighbors: on the CPU they are only read by the periodic
+ *            communications, and periodic markers are not supported by the offload).
  */
 struct CFlowDeviceData {
   CDeviceMirror<su2double> primitives;  /*!< @brief All points, nPrimVar columns. Written by the CPU. */
   CDeviceMirror<su2double> gradient[2]; /*!< @brief [0] viscous gradient, [1] reconstruction gradient (all rows). */
 
-  /*--- Reserved for the next steps (slope limiter, its min/max, least-squares matrix), not used yet. ---*/
-  CDeviceMirror<su2double> limiter;
+  CDeviceMirror<su2double> limiter;     /*!< @brief Limiter of the primitive variables (all rows). Written by the GPU. */
+
+  /*--- Reserved (min/max over the neighbors for the limiters, least-squares matrix), not used yet. ---*/
   CDeviceMirror<su2double> solutionMin;
   CDeviceMirror<su2double> solutionMax;
   CDeviceMirror<su2double> rMatrix;
@@ -90,13 +95,27 @@ struct CFlowDeviceData {
     haloNumDown += numDown;
   }
 
+  /*!
+   * @brief Add a transfer that does not go through a mirror (e.g. the small result of a reduction) to the totals.
+   */
+  void AddTransfer(size_t bytesUp, size_t bytesDown, size_t numUp, size_t numDown) {
+    otherUp += bytesUp;
+    otherDown += bytesDown;
+    otherNumUp += numUp;
+    otherNumDown += numDown;
+  }
+
   /*! @brief All bytes copied host to device, and device to host, by all the mirrors and halo exchanges since the creation. */
-  size_t BytesUploaded() const { return bankedUp + haloUp + SumOf(&CDeviceMirror<su2double>::BytesUploaded); }
-  size_t BytesDownloaded() const { return bankedDown + haloDown + SumOf(&CDeviceMirror<su2double>::BytesDownloaded); }
+  size_t BytesUploaded() const { return bankedUp + haloUp + otherUp + SumOf(&CDeviceMirror<su2double>::BytesUploaded); }
+  size_t BytesDownloaded() const {
+    return bankedDown + haloDown + otherDown + SumOf(&CDeviceMirror<su2double>::BytesDownloaded);
+  }
 
   /*! @brief All host to device and device to host transfers since the creation. */
-  size_t NumUploads() const { return bankedNumUp + haloNumUp + SumOf(&CDeviceMirror<su2double>::NumUploads); }
-  size_t NumDownloads() const { return bankedNumDown + haloNumDown + SumOf(&CDeviceMirror<su2double>::NumDownloads); }
+  size_t NumUploads() const { return bankedNumUp + haloNumUp + otherNumUp + SumOf(&CDeviceMirror<su2double>::NumUploads); }
+  size_t NumDownloads() const {
+    return bankedNumDown + haloNumDown + otherNumDown + SumOf(&CDeviceMirror<su2double>::NumDownloads);
+  }
 
   /*! @brief The part of the totals that is halo staging traffic. */
   size_t HaloBytesUploaded() const { return haloUp; }
@@ -105,6 +124,7 @@ struct CFlowDeviceData {
  private:
   size_t bankedUp = 0, bankedDown = 0, bankedNumUp = 0, bankedNumDown = 0;
   size_t haloUp = 0, haloDown = 0, haloNumUp = 0, haloNumDown = 0;
+  size_t otherUp = 0, otherDown = 0, otherNumUp = 0, otherNumDown = 0;
 
   void Bank(const CDeviceMirror<su2double>& m) {
     bankedUp += m.BytesUploaded();

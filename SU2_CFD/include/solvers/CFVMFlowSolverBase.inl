@@ -425,55 +425,67 @@ void CFVMFlowSolverBase<V, R>::SetPrimitive_Gradient_GG(CGeometry* geometry, con
 #ifdef SU2_ENABLE_GEOMETRY_DEVICE
   /*--- The device copy of the geometry is that of the finest grid, the coarse multigrid levels use the CPU. ---*/
   if (config->GetCUDA_Offload(CUDA_OFFLOAD::GRADIENTS) && MGLevel == MESH_0) {
-    /*--- First parts (volume and boundary contributions at domain points, symmetry corrections) on the GPU, by one
-     * thread. The barriers of the macros make the host data visible to it, and its results to all the threads. ---*/
-    /*--- SU2_GPU_CHECK_COMMS: keep the gradient that the device produced (shared by the threads, hence static). ---*/
-    const bool checkComms = gg_gpu::CheckCommsRequested();
-    static std::vector<su2double> deviceResult;
-
-    BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS {
-      const auto& device = geometry->GetDevice(config);
-      if (!deviceData) deviceData.reset(new CFlowDeviceData);
-
-      /*--- Same selection of markers as in the CPU implementation. ---*/
-      std::vector<char> skipped(geometry->GetnMarker());
-      for (size_t iMarker = 0; iMarker < skipped.size(); ++iMarker) {
-        const auto kind = config->GetMarker_All_KindBC(iMarker);
-        skipped[iMarker] = (kind == INTERNAL_BOUNDARY) || (kind == NEARFIELD_BOUNDARY) || (kind == PERIODIC_BOUNDARY);
-      }
-
-      bool firstCall = false;
-      /*--- The gradient container may store more variables per point than are computed here (nPrimVarGrad
-       * of the solver can be smaller than that of the container), its row length is gradient.rows(). ---*/
-      gg_gpu::ComputeGradientsGreenGauss(*deviceData, device, skipped, primitives.data(), primitives.cols(),
-                                         gradient.data(), gradient.rows(), nPrimVarGrad, prim_idx.Velocity(), reconstruction ? 1 : 0, firstCall);
-      if (firstCall && rank == MASTER_NODE) {
-        std::cout << "CUDA_OFFLOAD: the Green-Gauss gradient of the primitive variables is computed on the GPU"
-                  << (reconstruction ? " (reconstruction gradient)." : ".") << std::endl;
-      }
-      if (checkComms) deviceResult.assign(gradient.data(), gradient.data() + nPoint * gradient.rows() * nDim);
-    }
-    END_SU2_OMP_SAFE_GLOBAL_ACCESS
-
-    /*--- Nothing is left to do on the CPU: the symmetry corrections and the MPI halo exchange were done on the GPU
-     * (periodic markers are not supported by the offload). With the check on, the CPU communication runs anyway,
-     * on the host gradient that the device produced, and the halo rows it writes are compared with the ones that
-     * came from the device exchange. ---*/
-    if (checkComms) {
-      detail::computeGradientsGreenGaussComms(this, comm, commPer, *geometry, *config);
-      BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS {
-        gg_gpu::CheckHaloRows(deviceResult.data(), gradient.data(), geometry->GetnPointDomain(), nPoint,
-                              gradient.rows() * nDim, nPrimVarGrad * nDim, rank,
-                              reconstruction ? "reconstruction gradient" : "gradient");
-      }
-      END_SU2_OMP_SAFE_GLOBAL_ACCESS
-    }
+    SetPrimitive_Gradient_GG_Device(geometry, config, reconstruction, comm, commPer);
     return;
   }
 #endif
 
   computeGradientsGreenGauss(this, comm, commPer, *geometry, *config, primitives, 0, nPrimVarGrad, prim_idx.Velocity(), gradient);
 }
+
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+template <class V, ENUM_REGIME R>
+void CFVMFlowSolverBase<V, R>::SetPrimitive_Gradient_GG_Device(CGeometry* geometry, const CConfig* config,
+                                                               bool reconstruction, MPI_QUANTITIES comm,
+                                                               PERIODIC_QUANTITIES commPer) {
+  const auto& primitives = nodes->GetPrimitive();
+  auto& gradient = reconstruction ? nodes->GetGradient_Reconstruction() : nodes->GetGradient_Primitive();
+
+  /*--- First parts (volume and boundary contributions at domain points, symmetry corrections) on the GPU, by one
+   * thread. The barriers of the macros make the host data visible to it, and its results to all the threads. ---*/
+  /*--- SU2_GPU_CHECK_COMMS: keep the gradient that the device produced (shared by the threads, hence static). ---*/
+  const bool checkComms = gg_gpu::CheckCommsRequested();
+  static std::vector<su2double> deviceResult;
+
+  BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS {
+    const auto& device = geometry->GetDevice(config);
+    if (!deviceData) deviceData.reset(new CFlowDeviceData);
+
+    /*--- Same selection of markers as in the CPU implementation. ---*/
+    std::vector<char> skipped(geometry->GetnMarker());
+    for (size_t iMarker = 0; iMarker < skipped.size(); ++iMarker) {
+      const auto kind = config->GetMarker_All_KindBC(iMarker);
+      skipped[iMarker] = (kind == INTERNAL_BOUNDARY) || (kind == NEARFIELD_BOUNDARY) || (kind == PERIODIC_BOUNDARY);
+    }
+
+    bool firstCall = false;
+    /*--- The gradient container may store more variables per point than are computed here (nPrimVarGrad
+     * of the solver can be smaller than that of the container), its row length is gradient.rows(). ---*/
+    gg_gpu::ComputeGradientsGreenGauss(*deviceData, device, skipped, primitives.data(), primitives.cols(),
+                                       gradient.data(), gradient.rows(), nPrimVarGrad, prim_idx.Velocity(), reconstruction ? 1 : 0, firstCall);
+    if (firstCall && rank == MASTER_NODE) {
+      std::cout << "CUDA_OFFLOAD: the Green-Gauss gradient of the primitive variables is computed on the GPU"
+                << (reconstruction ? " (reconstruction gradient)." : ".") << std::endl;
+    }
+    if (checkComms) deviceResult.assign(gradient.data(), gradient.data() + nPoint * gradient.rows() * nDim);
+  }
+  END_SU2_OMP_SAFE_GLOBAL_ACCESS
+
+  /*--- Nothing is left to do on the CPU: the symmetry corrections and the MPI halo exchange were done on the GPU
+   * (periodic markers are not supported by the offload). With the check on, the CPU communication runs anyway,
+   * on the host gradient that the device produced, and the halo rows it writes are compared with the ones that
+   * came from the device exchange. ---*/
+  if (checkComms) {
+    detail::computeGradientsGreenGaussComms(this, comm, commPer, *geometry, *config);
+    BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS {
+      gg_gpu::CheckHaloRows(deviceResult.data(), gradient.data(), geometry->GetnPointDomain(), nPoint,
+                            gradient.rows() * nDim, nPrimVarGrad * nDim, rank,
+                            reconstruction ? "reconstruction gradient" : "gradient");
+    }
+    END_SU2_OMP_SAFE_GLOBAL_ACCESS
+  }
+}
+#endif
 
 template <class V, ENUM_REGIME R>
 void CFVMFlowSolverBase<V, R>::SetPrimitive_Gradient_LS(CGeometry* geometry, const CConfig* config,
@@ -568,9 +580,64 @@ void CFVMFlowSolverBase<V, R>::SetPrimitive_Limiter(CGeometry* geometry, const C
   auto& primMax = nodes->GetSolution_Max();
   auto& limiter = nodes->GetLimiter_Primitive();
 
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+  /*--- The device copy of the geometry is that of the finest grid, the coarse multigrid levels use the CPU. ---*/
+  if (config->GetCUDA_Offload(CUDA_OFFLOAD::LIMITERS) && MGLevel == MESH_0) {
+    SetPrimitive_Limiter_Device(geometry, config);
+    return;
+  }
+#endif
+
   computeLimiters(kindLimiter, this, MPI_QUANTITIES::PRIMITIVE_LIMITER, PERIODIC_LIM_PRIM_1, PERIODIC_LIM_PRIM_2,
                   *geometry, *config, 0, nPrimVarGrad, umusclKappa, primitives, gradient, primMin, primMax, limiter);
 }
+
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+template <class V, ENUM_REGIME R>
+void CFVMFlowSolverBase<V, R>::SetPrimitive_Limiter_Device(CGeometry* geometry, const CConfig* config) {
+  /*--- Everything (the limiter at the domain points, the global min/max of Venkatakrishnan-Wang, the halo
+   * exchange) is done on the GPU by one thread, see lim_gpu::ComputeLimiters. The CPU communication of the limiter
+   * is not needed, and the min/max over the neighbors (primMin, primMax) are not computed: their only readers are
+   * the periodic communications, periodic markers are not supported by the offload. ---*/
+  const auto kindLimiter = config->GetKind_SlopeLimit_Flow();
+  const auto umusclKappa = config->GetMUSCL_Kappa_Flow();
+  const auto& primitives = nodes->GetPrimitive();
+  auto& gradient = nodes->GetGradient_Reconstruction();
+  auto& limiter = nodes->GetLimiter_Primitive();
+
+  /*--- SU2_GPU_CHECK_COMMS: keep the limiter that the device produced (shared by the threads, hence static). ---*/
+  const bool checkComms = gg_gpu::CheckCommsRequested();
+  static std::vector<su2double> deviceResult;
+
+  BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS {
+    const auto& device = geometry->GetDevice(config);
+    if (!deviceData) deviceData.reset(new CFlowDeviceData);
+
+    bool firstCall = false;
+    lim_gpu::ComputeLimiters(*deviceData, *geometry, device, *config, kindLimiter, umusclKappa, primitives.data(),
+                             primitives.cols(), gradient.data(), gradient.rows(), nPrimVarGrad, limiter.data(),
+                             limiter.cols(), firstCall);
+    if (firstCall && rank == MASTER_NODE) {
+      std::cout << "CUDA_OFFLOAD: the " << lim_gpu::Name(kindLimiter)
+                << " limiter of the primitive variables is computed on the GPU." << std::endl;
+    }
+    if (checkComms) deviceResult.assign(limiter.data(), limiter.data() + nPoint * limiter.cols());
+  }
+  END_SU2_OMP_SAFE_GLOBAL_ACCESS
+
+  /*--- With the check on, the CPU communication runs anyway on the host limiter that the device produced, and the
+   * halo rows it writes are compared with the ones that came from the device exchange. ---*/
+  if (checkComms) {
+    InitiateComms(geometry, config, MPI_QUANTITIES::PRIMITIVE_LIMITER);
+    CompleteComms(geometry, config, MPI_QUANTITIES::PRIMITIVE_LIMITER);
+    BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS {
+      gg_gpu::CheckHaloRows(deviceResult.data(), limiter.data(), geometry->GetnPointDomain(), nPoint, limiter.cols(),
+                            nPrimVarGrad, rank, "limiter");
+    }
+    END_SU2_OMP_SAFE_GLOBAL_ACCESS
+  }
+}
+#endif
 
 template <class V, ENUM_REGIME R>
 CNumerics::ResidualType<> CFVMFlowSolverBase<V, R>::Viscous_Residual_impl(unsigned long iEdge, CGeometry *geometry,

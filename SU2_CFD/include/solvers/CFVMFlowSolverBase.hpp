@@ -30,6 +30,7 @@
 #include "../../../Common/include/toolboxes/geometry_toolbox.hpp"
 #include "../gradients/computeGradientsGreenGaussGPU.hpp"
 #include "../gradients/computeGradientsLeastSquaresGPU.hpp"
+#include "../limiters/computeLimitersGPU.hpp"
 #include "CFlowDeviceData.hpp"
 #include "CSolver.hpp"
 
@@ -1103,6 +1104,15 @@ class CFVMFlowSolverBase : public CSolver {
    */
   void SetPrimitive_Gradient_GG(CGeometry* geometry, const CConfig* config, bool reconstruction = false) override;
 
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+  /*!
+   * \brief Green-Gauss gradient of the primitive variables on the GPU (CUDA_OFFLOAD= (GRADIENTS), finest grid).
+   * \note Kept out of SetPrimitive_Gradient_GG so that the CPU implementation is compiled as it was without the offload.
+   */
+  void SetPrimitive_Gradient_GG_Device(CGeometry* geometry, const CConfig* config, bool reconstruction,
+                                       MPI_QUANTITIES comm, PERIODIC_QUANTITIES commPer);
+#endif
+
   /*!
    * \brief Compute the gradient of the primitive variables using a Least-Squares method,
    *        and stores the result in the <i>Gradient_Primitive</i> variable.
@@ -1127,6 +1137,16 @@ class CFVMFlowSolverBase : public CSolver {
    * \param[in] config - Definition of the particular problem.
    */
   void SetPrimitive_Limiter(CGeometry* geometry, const CConfig* config) final;
+
+#ifdef SU2_ENABLE_GEOMETRY_DEVICE
+  /*!
+   * \brief Limiter of the primitive variables on the GPU (CUDA_OFFLOAD= (GRADIENTS, LIMITERS), finest grid).
+   * \note Kept out of SetPrimitive_Limiter so that the CPU implementation is compiled as it was without the offload.
+   * \param[in] geometry - Geometrical definition of the problem.
+   * \param[in] config - Definition of the particular problem.
+   */
+  void SetPrimitive_Limiter_Device(CGeometry* geometry, const CConfig* config);
+#endif
 
   /*!
    * \brief Implementation of implicit Euler iteration.
