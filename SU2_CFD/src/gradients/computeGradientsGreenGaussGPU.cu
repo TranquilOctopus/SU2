@@ -38,6 +38,7 @@
 
 #include "../../../Common/include/parallelization/mpi_structure.hpp"
 
+#include "../../include/gradients/correctGradientsSymmetryPoint.hpp"
 #include "../../include/gradients/greenGaussPoint.hpp"
 
 namespace gg_gpu {
@@ -89,6 +90,32 @@ __global__ void BoundaryKernel(CGeometryDevice::MarkerView marker, const uint8_t
   }
 }
 
+/*--- Row (of nDim entries) of each variable of one point, as gradients[iVar][iDim], for detail::correctGradient. ---*/
+template <size_t nDim>
+struct PointGradient {
+  su2double* ptr;
+  __host__ __device__ su2double* operator[](size_t iVar) const { return ptr + iVar * nDim; }
+};
+
+/*--- One thread per vertex of one symmetry or Euler wall marker, the body is the function shared with the CPU
+ *    (correctGradientsSymmetry). A point appears at most once per marker, so there are no races, and the markers
+ *    are processed one after the other (launches on the same stream), in marker order like on the CPU. Vertices
+ *    on halo points are skipped: only the domain rows are on the device, the halo rows get their values from the
+ *    MPI communication after the correction. ---*/
+template <size_t nDim>
+__global__ void SymmetryKernel(CGeometryDevice::MarkerView marker, su2double* grad, size_t nVarStore, size_t varBegin,
+                               size_t varEnd, int idxVel, size_t nPointDomain) {
+  const size_t iVertex = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (iVertex >= marker.nVertex) return;
+
+  const size_t iPoint = marker.node[iVertex];
+  if (iPoint >= nPointDomain) return;
+
+  const su2double* unitNormal = marker.unitNormal + iVertex * nDim;
+  detail::correctGradient<nDim>(varBegin, varEnd, idxVel, unitNormal,
+                                PointGradient<nDim>{grad + iPoint * nVarStore * nDim});
+}
+
 template <size_t nDim>
 void Launch(const CGeometryDevice& geometry, const su2double* field, size_t fieldLd, su2double* grad,
             size_t nVarGrad, size_t varBegin, size_t varEnd, const std::vector<char>& useMarker) {
@@ -116,6 +143,23 @@ void Launch(const CGeometryDevice& geometry, const su2double* field, size_t fiel
   gpuErrChk(cudaDeviceSynchronize());
 }
 
+template <size_t nDim>
+void LaunchSymmetry(const CGeometryDevice& geometry, su2double* grad, size_t nVarStore, size_t varBegin, size_t varEnd,
+                    int idxVel) {
+  const size_t nPointDomain = geometry.GetnPointDomain();
+
+  for (size_t iMarker = 0; iMarker < geometry.GetnMarker(); ++iMarker) {
+    const auto marker = geometry.GetMarker(iMarker);
+    /*--- Only symmetry and Euler wall markers have unit normals. ---*/
+    if (marker.unitNormal == nullptr || marker.nVertex == 0) continue;
+    const unsigned blocks = static_cast<unsigned>((marker.nVertex + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    SymmetryKernel<nDim><<<blocks, BLOCK_SIZE>>>(marker, grad, nVarStore, varBegin, varEnd, idxVel, nPointDomain);
+    gpuErrChk(cudaGetLastError());
+  }
+
+  gpuErrChk(cudaDeviceSynchronize());
+}
+
 }  // namespace
 
 void ComputeGreenGaussDomain(const CGeometryDevice& geometry, size_t nDim, const su2double* field, size_t fieldLd,
@@ -127,6 +171,17 @@ void ComputeGreenGaussDomain(const CGeometryDevice& geometry, size_t nDim, const
     Launch<3>(geometry, field, fieldLd, grad, nVarGrad, varBegin, varEnd, useMarker);
   } else {
     SU2_MPI::Error("The Green-Gauss gradient on the GPU supports only 2 or 3 dimensions.", CURRENT_FUNCTION);
+  }
+}
+
+void CorrectGradientsSymmetry(const CGeometryDevice& geometry, size_t nDim, su2double* grad, size_t nVarStore,
+                              size_t varBegin, size_t varEnd, int idxVel) {
+  if (nDim == 2) {
+    LaunchSymmetry<2>(geometry, grad, nVarStore, varBegin, varEnd, idxVel);
+  } else if (nDim == 3) {
+    LaunchSymmetry<3>(geometry, grad, nVarStore, varBegin, varEnd, idxVel);
+  } else {
+    SU2_MPI::Error("The gradient symmetry correction on the GPU supports only 2 or 3 dimensions.", CURRENT_FUNCTION);
   }
 }
 

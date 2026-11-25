@@ -157,8 +157,38 @@ void computeGradientsGreenGaussDomain(CGeometry& geometry, const CConfig& config
 }
 
 /*!
- * \brief Second part of the Green-Gauss gradient: corrections for symmetry planes and Euler walls, periodic
- *        contributions and the MPI communications (always on the CPU).
+ * \brief Last part of the Green-Gauss gradient: periodic contributions and the MPI communications (always on
+ *        the CPU). Does nothing if no solver is given.
+ * \ingroup FvmAlgos
+ * \param[in] solver - Optional, solver associated with the field (used only for MPI).
+ * \param[in] kindMpiComm - Type of MPI communication required.
+ * \param[in] kindPeriodicComm - Type of periodic communication required.
+ * \param[in] geometry - Geometric grid properties.
+ * \param[in] config - Configuration of the problem, used to identify types of boundaries.
+ */
+inline void computeGradientsGreenGaussComms(CSolver* solver, MPI_QUANTITIES kindMpiComm,
+                                            PERIODIC_QUANTITIES kindPeriodicComm, CGeometry& geometry,
+                                            const CConfig& config) {
+  /*--- If no solver was provided we do not communicate ---*/
+
+  if (solver == nullptr) return;
+
+  /*--- Account for periodic contributions. ---*/
+
+  for (size_t iPeriodic = 1; iPeriodic <= config.GetnMarker_Periodic() / 2; ++iPeriodic) {
+    solver->InitiatePeriodicComms(&geometry, &config, iPeriodic, kindPeriodicComm);
+    solver->CompletePeriodicComms(&geometry, &config, iPeriodic, kindPeriodicComm);
+  }
+
+  /*--- Obtain the gradients at halo points from the MPI ranks that own them. ---*/
+
+  solver->InitiateComms(&geometry, &config, kindMpiComm);
+  solver->CompleteComms(&geometry, &config, kindMpiComm);
+}
+
+/*!
+ * \brief Second part of the Green-Gauss gradient: corrections for symmetry planes and Euler walls, then the
+ *        periodic contributions and the MPI communications (see computeGradientsGreenGaussComms).
  * \ingroup FvmAlgos
  * \param[in] solver - Optional, solver associated with the field (used only for MPI).
  * \param[in] kindMpiComm - Type of MPI communication required.
@@ -179,21 +209,7 @@ void computeGradientsGreenGaussFinish(CSolver* solver, MPI_QUANTITIES kindMpiCom
 
   correctGradientsSymmetry<nDim>(geometry, config, varBegin, varEnd, idxVel, gradient);
 
-  /*--- If no solver was provided we do not communicate ---*/
-
-  if (solver == nullptr) return;
-
-  /*--- Account for periodic contributions. ---*/
-
-  for (size_t iPeriodic = 1; iPeriodic <= config.GetnMarker_Periodic() / 2; ++iPeriodic) {
-    solver->InitiatePeriodicComms(&geometry, &config, iPeriodic, kindPeriodicComm);
-    solver->CompletePeriodicComms(&geometry, &config, iPeriodic, kindPeriodicComm);
-  }
-
-  /*--- Obtain the gradients at halo points from the MPI ranks that own them. ---*/
-
-  solver->InitiateComms(&geometry, &config, kindMpiComm);
-  solver->CompleteComms(&geometry, &config, kindMpiComm);
+  computeGradientsGreenGaussComms(solver, kindMpiComm, kindPeriodicComm, geometry, config);
 }
 
 /*!

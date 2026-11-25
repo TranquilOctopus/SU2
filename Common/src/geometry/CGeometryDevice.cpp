@@ -32,6 +32,7 @@
 #include <iostream>
 
 #include "../../include/geometry/CGeometry.hpp"
+#include "../../include/geometry/symmetryNormal.hpp"
 
 template <class T>
 void CGeometryDevice::Send(CDeviceMirror<T>& mirror, const T* hostPtr, size_t n, const std::string& name) {
@@ -92,6 +93,21 @@ void CGeometryDevice::Upload(const CGeometry& geometry, const CConfig& config) {
     const auto tag = "marker" + std::to_string(iMarker);
     Send(marker.node, marker.hostNode.data(), nVertex, tag + ".node");
     Send(marker.normal, marker.hostNormal.data(), nVertex * nDim, tag + ".normal");
+
+    /*--- Symmetry and Euler wall markers: the unit normal that the CPU uses to correct the gradients (possibly a
+     * modified normal at the intersection of symmetries), evaluated by the same host code. ---*/
+    if ((marker.kindBC == SYMMETRY_PLANE || marker.kindBC == EULER_WALL) && nVertex > 0) {
+      marker.hostUnitNormal.resize(nVertex * nDim);
+      for (size_t iVertex = 0; iVertex < nVertex; ++iVertex) {
+        su2double* n = &marker.hostUnitNormal[iVertex * nDim];
+        if (nDim == 2) {
+          GetSymmetryUnitNormal<2>(geometry, iMarker, iVertex, n);
+        } else {
+          GetSymmetryUnitNormal<3>(geometry, iMarker, iVertex, n);
+        }
+      }
+      Send(marker.unitNormal, marker.hostUnitNormal.data(), nVertex * nDim, tag + ".unitNormal");
+    }
   }
 }
 
@@ -131,6 +147,7 @@ CGeometryDevice::MarkerView CGeometryDevice::GetMarker(size_t iMarker) const {
   view.nVertex = marker.hostNode.size();
   view.node = marker.node.DeviceRead();
   view.normal = marker.normal.DeviceRead();
+  if (!marker.hostUnitNormal.empty()) view.unitNormal = marker.unitNormal.DeviceRead();
   return view;
 }
 

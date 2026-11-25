@@ -46,7 +46,8 @@ class CConfig;
  * @class CGeometryDevice
  * @brief Copy of the (MESH_0) geometry arrays needed by the GPU kernels, uploaded once and read-only afterwards.
  * @details Holds the point adjacency (CSR) with the edge index of each entry, edge normals, control volumes,
- * periodic volumes, domain flags, and for each marker its type, vertex points and vertex normals. Index and
+ * periodic volumes, domain flags, and for each marker its type, vertex points and vertex normals (plus, for symmetry
+ * and Euler wall markers, the unit normals used by the gradient correction). Index and
  * value types are exactly those of the host containers. The snapshot does not follow later changes of the
  * host geometry (e.g. mesh motion), it is built from the geometry as it is when the object is created.
  * Objects are created by CGeometry::GetDevice, which is not thread safe: call it outside parallel regions.
@@ -65,6 +66,9 @@ class CGeometryDevice {
     size_t nVertex = 0;                /*!< @brief Number of vertices. */
     const NodeIdx* node = nullptr;     /*!< @brief Point of each vertex. */
     const su2double* normal = nullptr; /*!< @brief Vertex normals, row-major, one row (of length nDim) per vertex. */
+    /*! @brief Unit normals for the gradient correction (see GetSymmetryUnitNormal), same layout as normal. Only
+     *         for symmetry and Euler wall markers, nullptr for the others. */
+    const su2double* unitNormal = nullptr;
   };
 
  private:
@@ -73,8 +77,10 @@ class CGeometryDevice {
     unsigned short kindBC = 0;
     std::vector<NodeIdx> hostNode;
     std::vector<su2double> hostNormal;
+    std::vector<su2double> hostUnitNormal;
     CDeviceMirror<NodeIdx> node;
     CDeviceMirror<su2double> normal;
+    CDeviceMirror<su2double> unitNormal;
   };
 
   size_t nPoint = 0, nPointDomain = 0, nEdge = 0, nDim = 0;

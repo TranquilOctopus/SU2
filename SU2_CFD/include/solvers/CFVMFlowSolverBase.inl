@@ -420,8 +420,8 @@ void CFVMFlowSolverBase<V, R>::SetPrimitive_Gradient_GG(CGeometry* geometry, con
 #ifdef SU2_ENABLE_GEOMETRY_DEVICE
   /*--- The device copy of the geometry is that of the finest grid, the coarse multigrid levels use the CPU. ---*/
   if (config->GetCUDA_Offload(CUDA_OFFLOAD::GRADIENTS) && MGLevel == MESH_0) {
-    /*--- First part (volume and boundary contributions at domain points) on the GPU, by one thread. The
-     * barriers of the macros make the host data visible to it, and its results to all the threads. ---*/
+    /*--- First parts (volume and boundary contributions at domain points, symmetry corrections) on the GPU, by one
+     * thread. The barriers of the macros make the host data visible to it, and its results to all the threads. ---*/
     BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS {
       const auto& device = geometry->GetDevice(config);
       if (!deviceData) deviceData.reset(new CFlowDeviceData);
@@ -437,8 +437,7 @@ void CFVMFlowSolverBase<V, R>::SetPrimitive_Gradient_GG(CGeometry* geometry, con
       /*--- The gradient container may store more variables per point than are computed here (nPrimVarGrad
        * of the solver can be smaller than that of the container), its row length is gradient.rows(). ---*/
       gg_gpu::ComputeGradientsGreenGauss(*deviceData, device, skipped, primitives.data(), primitives.cols(),
-                                         gradient.data(), gradient.rows(), nPrimVarGrad, reconstruction ? 1 : 0,
-                                         firstCall);
+                                         gradient.data(), gradient.rows(), nPrimVarGrad, prim_idx.Velocity(), reconstruction ? 1 : 0, firstCall);
       if (firstCall && rank == MASTER_NODE) {
         std::cout << "CUDA_OFFLOAD: the Green-Gauss gradient of the primitive variables is computed on the GPU"
                   << (reconstruction ? " (reconstruction gradient)." : ".") << std::endl;
@@ -446,9 +445,9 @@ void CFVMFlowSolverBase<V, R>::SetPrimitive_Gradient_GG(CGeometry* geometry, con
     }
     END_SU2_OMP_SAFE_GLOBAL_ACCESS
 
-    /*--- Second part (symmetry corrections, periodic and MPI communications) on the CPU. ---*/
-    computeGradientsGreenGaussFinish(this, comm, commPer, *geometry, *config, 0, nPrimVarGrad, prim_idx.Velocity(),
-                                     gradient);
+    /*--- Remaining part (periodic and MPI communications) on the CPU, the symmetry corrections were done by the
+     * GPU. ---*/
+    detail::computeGradientsGreenGaussComms(this, comm, commPer, *geometry, *config);
     return;
   }
 #endif

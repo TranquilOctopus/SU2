@@ -31,63 +31,9 @@
 #include <algorithm>
 
 #include "../../../Common/include/parallelization/omp_structure.hpp"
+#include "../../../Common/include/geometry/symmetryNormal.hpp"
 #include "../../../Common/include/toolboxes/geometry_toolbox.hpp"
-
-namespace detail {
-/*!
- * \brief Correct the gradient on a symmetry plane.
- * \ingroup FvmAlgos
- * \param[in] varBegin - Start of the variables.
- * \param[in] varEnd - End of the variables.
- * \param[in] idxVel - Variable index where velocity gradients start (-1 if all variables are scalars).
- * \param[in] n - Normal direction.
- * \param[in, out] gradients - The gradients to be modified.
- */
-template <size_t nDim, class Matrix, class Scalar>
-inline void correctGradient(const size_t varBegin, const size_t varEnd, const int idxVel, const Scalar* n,
-                            Matrix&& gradients) {
-
-  /*--- First we correct the part that involves velocities. ---*/
-
-  if (idxVel >= static_cast<int>(varBegin) && idxVel + nDim <= varEnd) {
-    /*--- Normal gradient of velocity components and gradient of normal velocity. ---*/
-    su2double normalGrad[nDim] = {}, gradNormalVel[nDim] = {};
-
-    for (size_t iDim = 0; iDim < nDim; iDim++) {
-      normalGrad[iDim] = GeometryToolbox::DotProduct(nDim, gradients[idxVel + iDim], n);
-
-      for (size_t jDim = 0; jDim < nDim; jDim++) {
-        gradNormalVel[jDim] += n[iDim] * gradients[idxVel + iDim][jDim];
-      }
-    }
-
-    /*--- Normal gradient of the normal velocity. ---*/
-    const su2double normalGradNormalVel = GeometryToolbox::DotProduct(nDim, n, gradNormalVel);
-
-    /*--- Remove the tangential projection (I - n.n^T) of the normal gradients.
-     * And the normal projection (n.n^T) of the tangential gradients.
-     * dV = dV - (I - n.n^T) dV n.n^T - n.n^T dV (I - n.n^T) ---*/
-
-    for (size_t iDim = 0; iDim < nDim; iDim++) {
-      for (size_t jDim = 0; jDim < nDim; jDim++) {
-        gradients[idxVel + iDim][jDim] -= normalGrad[iDim] * n[jDim] + n[iDim] * gradNormalVel[jDim];
-        gradients[idxVel + iDim][jDim] += 2 * n[iDim] * normalGradNormalVel * n[jDim];
-      }
-    }
-  }
-
-  /*--- Remove the normal component for all scalars (excluding velocities). ---*/
-
-  for (auto iVar = varBegin; iVar < varEnd; iVar++) {
-    if (idxVel != -1 && static_cast<int>(iVar) >= idxVel && iVar < idxVel + nDim) continue;
-
-    const su2double normalGrad = GeometryToolbox::DotProduct(nDim, n, gradients[iVar]);
-    for (size_t iDim = 0; iDim < nDim; iDim++) {
-      gradients[iVar][iDim] -= normalGrad * n[iDim];
-    }
-  }
-}
-}
+#include "correctGradientsSymmetryPoint.hpp"
 
 /*!
  * \brief Correct gradients on symmetry and Euler (slip) markers to respect the conditions:
@@ -126,15 +72,7 @@ void correctGradientsSymmetry(CGeometry& geometry, const CConfig& config, const 
        * or a modified normal if there are intersecting symmetries. ---*/
 
       su2double unitNormal[nDim] = {};
-      const auto it = geometry.symmetryNormals[iMarker].find(iVertex);
-
-      if (it != geometry.symmetryNormals[iMarker].end()) {
-        for (auto iDim = 0u; iDim < nDim; iDim++) unitNormal[iDim] = it->second[iDim];
-      } else {
-        geometry.vertex[iMarker][iVertex]->GetNormal(unitNormal);
-        const su2double area = GeometryToolbox::Norm(nDim, unitNormal);
-        for (auto iDim = 0u; iDim < nDim; iDim++) unitNormal[iDim] /= area;
-      }
+      GetSymmetryUnitNormal<nDim>(geometry, iMarker, iVertex, unitNormal);
 
       detail::correctGradient<nDim>(varBegin, varEnd, idxVel, unitNormal, gradient[iPoint]);
 

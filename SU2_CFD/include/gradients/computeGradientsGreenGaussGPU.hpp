@@ -64,10 +64,29 @@ void ComputeGreenGaussDomain(const CGeometryDevice& geometry, size_t nDim, const
                              const std::vector<char>& useMarker);
 
 /*!
- * @brief Run the first part of the Green-Gauss gradient of the primitive variables on the GPU.
- * @details Launches the kernels and downloads the gradient of the domain points, which is a contiguous prefix of the
- *          host array, so the halo rows are left alone. Must be called by a single thread (no OpenMP synchronization
- *          inside). The caller then runs the CPU part (second part).
+ * @brief Correct the gradients on the symmetry plane and Euler wall markers on the device (the same as
+ *        correctGradientsSymmetry does on the CPU: one launch per marker, in marker order, one thread per vertex, the
+ *        per-vertex function is shared with the CPU).
+ * @note Synchronous. Vertices on halo points are skipped (only domain rows are on the device, the halo rows are
+ *       filled by the MPI communication that follows the correction).
+ * @param[in] geometry - Device copy of the geometry.
+ * @param[in] nDim - Number of dimensions, 2 or 3.
+ * @param[in,out] grad - Device array, row-major (point, variable, dimension), with nVarStore variables per point.
+ * @param[in] nVarStore - Number of variables per point stored in the gradient.
+ * @param[in] varBegin - First variable to correct.
+ * @param[in] varEnd - End (exclusive) of the range of variables to correct.
+ * @param[in] idxVel - Variable index where the velocity starts, -1 if all variables are scalars.
+ */
+void CorrectGradientsSymmetry(const CGeometryDevice& geometry, size_t nDim, su2double* grad, size_t nVarStore,
+                              size_t varBegin, size_t varEnd, int idxVel);
+
+/*!
+ * @brief Run the first and second parts of the Green-Gauss gradient of the primitive variables on the GPU
+ *        (volume and boundary contributions, then the symmetry and Euler wall corrections).
+ * @details Launches the kernels and downloads the (corrected) gradient of the domain points, which is a contiguous prefix
+ *          of the host array, so the halo rows are left alone. Must be called by a single thread (no OpenMP
+ *          synchronization inside). The caller then runs the remaining CPU part (periodic and MPI communications,
+ *          see detail::computeGradientsGreenGaussComms).
  *
  *          The primitives are NOT marked as modified here: the device copy is used as it is, and uploaded (once)
  *          only if the mirror says that the host copy is the newer one. Whoever writes the host primitives has to
@@ -75,8 +94,8 @@ void ComputeGreenGaussDomain(const CGeometryDevice& geometry, size_t nDim, const
  *
  *          When the gradient container stores more variables than are computed (nVarStore > nVarGrad), only the
  *          computed variables of every row are downloaded: the others are never read by the kernels, and the host
- *          values are the current ones (the CPU part has corrected them after an earlier call that computed them),
- *          while the device values are the uncorrected ones, so downloading them would overwrite the corrections.
+ *          values are the current ones (they were downloaded, corrected, by an earlier call that computed them),
+ *          while the device values may be stale, so downloading them would overwrite the corrections.
  *          Therefore nothing is uploaded either.
  * @param[in,out] data - Mirrors, attached on the first call (and again if the host arrays moved).
  * @param[in] geometry - Finest grid.
@@ -87,13 +106,14 @@ void ComputeGreenGaussDomain(const CGeometryDevice& geometry, size_t nDim, const
  * @param[in] nVarStore - Number of variables per point stored in the gradient (its row length).
  * @param[in] nVarGrad - Number of variables for which the gradient is computed (the first ones, at most nVarStore),
  *                       the others are not modified.
+ * @param[in] idxVel - Variable index where the velocity starts (for the symmetry correction), -1 if none.
  * @param[in] which - 0 for the viscous gradient, 1 for the reconstruction gradient.
  * @param[out] firstCall - Set to true if the mirrors were created by this call (for messages).
  */
 inline void ComputeGradientsGreenGauss(CFlowDeviceData& data, const CGeometryDevice& geometry,
                                        const std::vector<char>& markerSkipped, const su2double* hostPrimitives,
                                        size_t nPrimVar, su2double* hostGradient, size_t nVarStore,
-                                       size_t nVarGrad, int which, bool& firstCall) {
+                                       size_t nVarGrad, int idxVel, int which, bool& firstCall) {
   const size_t nPoint = geometry.GetnPoint(), nPointDomain = geometry.GetnPointDomain(), nDim = geometry.GetnDim();
 
   auto& prim = data.primitives;
@@ -123,6 +143,7 @@ inline void ComputeGradientsGreenGauss(CFlowDeviceData& data, const CGeometryDev
   if (firstOfAll) {
     ComputeGreenGaussDomain(geometry, nDim, prim.DeviceData(), nPrimVar, grad.DeviceData(), nVarStore, 0, nVarGrad,
                             data.useMarker);
+    CorrectGradientsSymmetry(geometry, nDim, grad.DeviceWrite(), nVarStore, 0, nVarGrad, idxVel);
   }
 
   /*--- A no-op if the device copy is current (the usual case: the gradient of the same iteration was computed
@@ -131,6 +152,7 @@ inline void ComputeGradientsGreenGauss(CFlowDeviceData& data, const CGeometryDev
 
   ComputeGreenGaussDomain(geometry, nDim, prim.DeviceRead(), nPrimVar, grad.DeviceWrite(), nVarStore, 0, nVarGrad,
                           data.useMarker);
+  CorrectGradientsSymmetry(geometry, nDim, grad.DeviceWrite(), nVarStore, 0, nVarGrad, idxVel);
 
   grad.DeviceModified();
   if (nVarStore == nVarGrad) {

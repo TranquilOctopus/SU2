@@ -49,7 +49,7 @@
  *            upload is lazy: the first consumer after a CPU write calls primitives.ToDevice(), the others find
  *            the mirror current and copy nothing.
  *          - gradient[0], gradient[1]: written by the GPU kernels (only the domain rows are mirrored). Only the
- *            variables computed by the kernel are downloaded, the CPU then completes them (symmetry, periodic,
+ *            variables computed by the kernel are downloaded, the CPU then completes them (periodic,
  *            MPI), so after that the device copy is NOT the final gradient. The variables that a call does not
  *            compute are neither uploaded nor downloaded, they only live on the host (see ComputeGradientsGreenGauss).
  *          - limiter, solutionMin, solutionMax, rMatrix: reserved for later steps, never attached yet.
