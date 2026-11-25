@@ -32,11 +32,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "../containers/CDeviceMirror.hpp"
 #include "../toolboxes/graph_toolbox.hpp"
+#include "CDeviceHaloExchange.hpp"
 #include "GeomView.hpp"
 
 class CGeometry;
@@ -93,6 +95,7 @@ class CGeometryDevice {
   std::vector<uint8_t> hostDomain;
   CDeviceMirror<uint8_t> domain;
   std::vector<Marker> markers;
+  std::unique_ptr<CDeviceHaloExchange> halo;
 
   void Upload(const CGeometry& geometry, const CConfig& config);
 
@@ -127,6 +130,9 @@ class CGeometryDevice {
 
   /*! @brief Device pointers and sizes of one marker. */
   MarkerView GetMarker(size_t iMarker) const;
+
+  /*! @brief MPI halo exchange of device arrays (non-const on purpose: it owns staging buffers, not geometry data). */
+  CDeviceHaloExchange& GetHalo() const { return *halo; }
 };
 
 #endif  // SU2_ENABLE_GEOMETRY_DEVICE

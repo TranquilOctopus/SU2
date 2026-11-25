@@ -106,8 +106,8 @@ void RunComparison(CGeometry& geometry, const CConfig& config, size_t nVar, size
                                      field.data(), field.cols(), gpu.data(), nStore, nVar, -1, 0, firstCall);
   CHECK(firstCall);
   const size_t bytesPrim = nPoint * field.cols() * sizeof(double);
-  const size_t bytesGrad = geometry.GetnPointDomain() * nStore * nDim * sizeof(double);
-  const size_t bytesComputed = geometry.GetnPointDomain() * nVar * nDim * sizeof(double);
+  const size_t bytesGrad = geometry.GetnPoint() * nStore * nDim * sizeof(double);
+  const size_t bytesComputed = geometry.GetnPoint() * nVar * nDim * sizeof(double);
   CHECK(data.BytesUploaded() == bytesPrim);
   /*--- Only the computed variables come back (the others keep the sentinel of the host, checked below). ---*/
   CHECK(data.BytesDownloaded() == (extraGradVars ? bytesComputed : bytesGrad));

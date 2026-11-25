@@ -393,12 +393,17 @@ void CFVMFlowSolverBase<V, R>::ReportDeviceTransfers(const CConfig* config, unsi
 
   const size_t up = deviceData->BytesUploaded(), down = deviceData->BytesDownloaded();
   const size_t nUp = deviceData->NumUploads(), nDown = deviceData->NumDownloads();
+  const size_t haloUp = deviceData->HaloBytesUploaded(), haloDown = deviceData->HaloBytesDownloaded();
 
   if (rank == MASTER_NODE) {
     std::cout << "CUDA_OFFLOAD iteration " << iter << ": host to device " << (up - reportedBytesUp) / 1.0e6 << " MB ("
               << nUp - reportedNumUp << " copies), device to host " << (down - reportedBytesDown) / 1.0e6 << " MB ("
-              << nDown - reportedNumDown << " copies)." << std::endl;
+              << nDown - reportedNumDown << " copies), of which halo exchange staging "
+              << (haloUp - reportedHaloUp) / 1.0e6 << " MB up and " << (haloDown - reportedHaloDown) / 1.0e6
+              << " MB down." << std::endl;
   }
+  reportedHaloUp = haloUp;
+  reportedHaloDown = haloDown;
   reportedBytesUp = up;
   reportedBytesDown = down;
   reportedNumUp = nUp;
@@ -422,6 +427,10 @@ void CFVMFlowSolverBase<V, R>::SetPrimitive_Gradient_GG(CGeometry* geometry, con
   if (config->GetCUDA_Offload(CUDA_OFFLOAD::GRADIENTS) && MGLevel == MESH_0) {
     /*--- First parts (volume and boundary contributions at domain points, symmetry corrections) on the GPU, by one
      * thread. The barriers of the macros make the host data visible to it, and its results to all the threads. ---*/
+    /*--- SU2_GPU_CHECK_COMMS: keep the gradient that the device produced (shared by the threads, hence static). ---*/
+    const bool checkComms = gg_gpu::CheckCommsRequested();
+    static std::vector<su2double> deviceResult;
+
     BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS {
       const auto& device = geometry->GetDevice(config);
       if (!deviceData) deviceData.reset(new CFlowDeviceData);
@@ -442,12 +451,23 @@ void CFVMFlowSolverBase<V, R>::SetPrimitive_Gradient_GG(CGeometry* geometry, con
         std::cout << "CUDA_OFFLOAD: the Green-Gauss gradient of the primitive variables is computed on the GPU"
                   << (reconstruction ? " (reconstruction gradient)." : ".") << std::endl;
       }
+      if (checkComms) deviceResult.assign(gradient.data(), gradient.data() + nPoint * gradient.rows() * nDim);
     }
     END_SU2_OMP_SAFE_GLOBAL_ACCESS
 
-    /*--- Remaining part (periodic and MPI communications) on the CPU, the symmetry corrections were done by the
-     * GPU. ---*/
-    detail::computeGradientsGreenGaussComms(this, comm, commPer, *geometry, *config);
+    /*--- Nothing is left to do on the CPU: the symmetry corrections and the MPI halo exchange were done on the GPU
+     * (periodic markers are not supported by the offload). With the check on, the CPU communication runs anyway,
+     * on the host gradient that the device produced, and the halo rows it writes are compared with the ones that
+     * came from the device exchange. ---*/
+    if (checkComms) {
+      detail::computeGradientsGreenGaussComms(this, comm, commPer, *geometry, *config);
+      BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS {
+        gg_gpu::CheckHaloRows(deviceResult.data(), gradient.data(), geometry->GetnPointDomain(), nPoint,
+                              gradient.rows() * nDim, nPrimVarGrad * nDim, rank,
+                              reconstruction ? "reconstruction gradient" : "gradient");
+      }
+      END_SU2_OMP_SAFE_GLOBAL_ACCESS
+    }
     return;
   }
 #endif

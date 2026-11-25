@@ -34,6 +34,11 @@
 #ifdef SU2_ENABLE_GEOMETRY_DEVICE
 
 #include <cstddef>
+#include <cstdlib>
+#include <cstring>
+#include <iomanip>
+#include <iostream>
+#include <string>
 #include <vector>
 
 #include "../../../Common/include/containers/CDeviceMirror.hpp"
@@ -53,7 +58,7 @@ namespace gg_gpu {
  * @param[in] field - Device array, row-major, one row of length fieldLd per point (all points, incl. halos).
  * @param[in] fieldLd - Row length of the field.
  * @param[out] grad - Device array, row-major (point, variable, dimension), with nVarStore variables per point
- *                    and at least nPointDomain points.
+ *                    and at least nPointDomain points (the halo rows are not touched).
  * @param[in] nVarStore - Number of variables per point stored in the gradient.
  * @param[in] varBegin - First variable for which the gradient is computed.
  * @param[in] varEnd - End (exclusive) of the range of variables.
@@ -67,8 +72,8 @@ void ComputeGreenGaussDomain(const CGeometryDevice& geometry, size_t nDim, const
  * @brief Correct the gradients on the symmetry plane and Euler wall markers on the device (the same as
  *        correctGradientsSymmetry does on the CPU: one launch per marker, in marker order, one thread per vertex, the
  *        per-vertex function is shared with the CPU).
- * @note Synchronous. Vertices on halo points are skipped (only domain rows are on the device, the halo rows are
- *       filled by the MPI communication that follows the correction).
+ * @note Synchronous. Vertices on halo points are skipped (the halo rows are filled by the MPI communication that
+ *       follows the correction, see CDeviceHaloExchange).
  * @param[in] geometry - Device copy of the geometry.
  * @param[in] nDim - Number of dimensions, 2 or 3.
  * @param[in,out] grad - Device array, row-major (point, variable, dimension), with nVarStore variables per point.
@@ -83,20 +88,23 @@ void CorrectGradientsSymmetry(const CGeometryDevice& geometry, size_t nDim, su2d
 /*!
  * @brief Run the first and second parts of the Green-Gauss gradient of the primitive variables on the GPU
  *        (volume and boundary contributions, then the symmetry and Euler wall corrections).
- * @details Launches the kernels and downloads the (corrected) gradient of the domain points, which is a contiguous prefix
- *          of the host array, so the halo rows are left alone. Must be called by a single thread (no OpenMP
- *          synchronization inside). The caller then runs the remaining CPU part (periodic and MPI communications,
- *          see detail::computeGradientsGreenGaussComms).
+ * @details Launches the kernels, fills the halo rows of the gradient on the device with the values of the owner
+ *          ranks (CDeviceHaloExchange of the geometry, the same messages as the CPU communication of the gradient: the
+ *          first nVarGrad variables of every point) and downloads the final gradient of all the points. Nothing
+ *          remains to be done on the CPU, the periodic communication is not needed since periodic markers are not
+ *          supported by the offload. Must be called by a single thread of every rank (no OpenMP synchronization
+ *          inside, MPI calls inside).
  *
  *          The primitives are NOT marked as modified here: the device copy is used as it is, and uploaded (once)
  *          only if the mirror says that the host copy is the newer one. Whoever writes the host primitives has to
  *          call data.PrimitivesModified() (the first call after the attachment uploads in any case).
  *
  *          When the gradient container stores more variables than are computed (nVarStore > nVarGrad), only the
- *          computed variables of every row are downloaded: the others are never read by the kernels, and the host
- *          values are the current ones (they were downloaded, corrected, by an earlier call that computed them),
- *          while the device values may be stale, so downloading them would overwrite the corrections.
- *          Therefore nothing is uploaded either.
+ *          computed variables of every row are exchanged and downloaded, like the CPU communication does (it sends
+ *          the nVarGrad first variables of the gradient, the others are not touched on either side): the other
+ *          variables are never read by the kernels, and the host values are the current ones (they were
+ *          downloaded, corrected, by an earlier call that computed them), while the device values may be stale, so
+ *          downloading them would overwrite the corrections. Therefore nothing is uploaded either.
  * @param[in,out] data - Mirrors, attached on the first call (and again if the host arrays moved).
  * @param[in] geometry - Finest grid.
  * @param[in] markerSkipped - One flag per marker, true for the markers that do not contribute (internal, etc.).
@@ -114,7 +122,7 @@ inline void ComputeGradientsGreenGauss(CFlowDeviceData& data, const CGeometryDev
                                        const std::vector<char>& markerSkipped, const su2double* hostPrimitives,
                                        size_t nPrimVar, su2double* hostGradient, size_t nVarStore,
                                        size_t nVarGrad, int idxVel, int which, bool& firstCall) {
-  const size_t nPoint = geometry.GetnPoint(), nPointDomain = geometry.GetnPointDomain(), nDim = geometry.GetnDim();
+  const size_t nPoint = geometry.GetnPoint(), nDim = geometry.GetnDim();
 
   auto& prim = data.primitives;
   auto& grad = data.gradient[which];
@@ -126,10 +134,9 @@ inline void ComputeGradientsGreenGauss(CFlowDeviceData& data, const CGeometryDev
     data.Attach(prim, const_cast<su2double*>(hostPrimitives), nPoint * nPrimVar, "GG primitives");
     firstCall = true;
   }
-  /*--- Only the domain points are attached: they come first in the storage, and the halo rows must keep the
-   * values that are on the host (they are only overwritten by the MPI communication after this). ---*/
+  /*--- All the points: the halo rows are filled on the device by the halo exchange below. ---*/
   if (!grad.IsAttached() || grad.HostData() != hostGradient) {
-    data.Attach(grad, hostGradient, nPointDomain * nVarStore * nDim,
+    data.Attach(grad, hostGradient, nPoint * nVarStore * nDim,
                 which ? "GG reconstruction gradient" : "GG gradient");
     firstCall = true;
   }
@@ -154,11 +161,78 @@ inline void ComputeGradientsGreenGauss(CFlowDeviceData& data, const CGeometryDev
                           data.useMarker);
   CorrectGradientsSymmetry(geometry, nDim, grad.DeviceWrite(), nVarStore, 0, nVarGrad, idxVel);
 
+  /*--- The halo rows from the owners, the same values as the CPU communication gives. The pitch is the row of the
+   * container, the width the variables that are computed (what the CPU sends for the gradient). ---*/
+  auto& halo = geometry.GetHalo();
+  const size_t up0 = halo.BytesUploaded(), down0 = halo.BytesDownloaded();
+  const size_t nUp0 = halo.NumUploads(), nDown0 = halo.NumDownloads();
+  halo.Exchange(grad.DeviceData(), nVarStore * nDim, nVarGrad * nDim);
+  data.AddHaloTraffic(halo.BytesUploaded() - up0, halo.BytesDownloaded() - down0, halo.NumUploads() - nUp0,
+                      halo.NumDownloads() - nDown0);
+
   grad.DeviceModified();
   if (nVarStore == nVarGrad) {
     grad.ToHost();
   } else {
     grad.ToHostRowPrefix(nVarGrad * nDim, nVarStore * nDim);
+  }
+}
+
+/*!
+ * @brief Whether the check of the device halo exchange is requested (environment variable SU2_GPU_CHECK_COMMS set to
+ *        something other than empty or 0, read once).
+ * @details With the check on, the caller keeps a copy of the gradient that the device produced (halo rows received
+ *          by the device exchange), then runs the CPU communication on the host gradient, and compares the halo rows
+ *          with CheckHaloRows. It costs a copy of the gradient and a CPU exchange per call, so it is off by default.
+ */
+inline bool CheckCommsRequested() {
+  static const bool requested = [] {
+    const char* env = std::getenv("SU2_GPU_CHECK_COMMS");
+    return env != nullptr && *env != '\0' && std::strcmp(env, "0") != 0;
+  }();
+  return requested;
+}
+
+/*!
+ * @brief Compare, bit for bit, the halo rows that the device exchange produced with those of the CPU exchange. Ends
+ *        the run with the details of the first differences if there is any.
+ * @param[in] fromDevice - Copy of the host gradient as downloaded from the device.
+ * @param[in] fromCpu - The host gradient after the CPU communication.
+ * @param[in] nPointDomain - Number of domain points (the halo rows follow).
+ * @param[in] nPoint - Number of points.
+ * @param[in] pitch - Row length (nVarStore * nDim).
+ * @param[in] width - Number of entries per row that the communication handles (nVarGrad * nDim).
+ * @param[in] rank - MPI rank, for the messages.
+ * @param[in] label - Name of the gradient, for the messages.
+ */
+inline void CheckHaloRows(const su2double* fromDevice, const su2double* fromCpu, size_t nPointDomain, size_t nPoint,
+                          size_t pitch, size_t width, int rank, const std::string& label) {
+  static size_t nCalls = 0, nValues = 0;
+  size_t nBad = 0;
+  for (size_t iPoint = nPointDomain; iPoint < nPoint; ++iPoint) {
+    for (size_t j = 0; j < width; ++j) {
+      const size_t k = iPoint * pitch + j;
+      if (std::memcmp(&fromDevice[k], &fromCpu[k], sizeof(su2double)) != 0) {
+        if (nBad < 5) {
+          std::cerr << "SU2_GPU_CHECK_COMMS mismatch (rank " << rank << ", " << label << "): point " << iPoint
+                    << " (halo row " << iPoint - nPointDomain << "), entry " << j << ": device " << std::scientific
+                    << std::setprecision(17) << fromDevice[k] << ", CPU " << fromCpu[k] << std::endl;
+        }
+        ++nBad;
+      }
+    }
+  }
+  ++nCalls;
+  nValues += (nPoint - nPointDomain) * width;
+  if (nBad > 0) {
+    SU2_MPI::Error("The halo rows of the gradient from the device exchange differ from the CPU exchange (" +
+                       std::to_string(nBad) + " values, see above).",
+                   CURRENT_FUNCTION);
+  }
+  if (nCalls <= 2 || nCalls % 200 == 0) {
+    std::cout << "SU2_GPU_CHECK_COMMS rank " << rank << ": " << nCalls << " exchanges checked, " << nValues
+              << " halo values bit-identical to the CPU exchange (last: " << label << ", row length " << pitch
+              << ", exchanged " << width << ")." << std::endl;
   }
 }
 

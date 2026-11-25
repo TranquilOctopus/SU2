@@ -72,6 +72,10 @@ void CGeometryDevice::Upload(const CGeometry& geometry, const CConfig& config) {
   Send(volume, &nodes->GetVolume(0), nPoint, "volume");
   Send(periodicVolume, &nodes->GetPeriodicVolume(0), nPoint, "periodicVolume");
 
+  /*--- Point lists of the MPI halo exchange (finest grid, so the geometry has its point-to-point structure). ---*/
+  halo.reset(new CDeviceHaloExchange(geometry));
+  bytes += halo->GetBytes();
+
   hostDomain.resize(nPoint);
   for (size_t iPoint = 0; iPoint < nPoint; ++iPoint) hostDomain[iPoint] = nodes->GetDomain(iPoint) ? 1 : 0;
   Send(domain, hostDomain.data(), nPoint, "domain");

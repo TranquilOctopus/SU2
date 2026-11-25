@@ -57,6 +57,7 @@ class CFVMFlowSolverBase : public CSolver {
 
   /*!< \brief Totals at the last ReportDeviceTransfers (CUDA_OFFLOAD_VERBOSE). */
   size_t reportedBytesUp = 0, reportedBytesDown = 0, reportedNumUp = 0, reportedNumDown = 0;
+  size_t reportedHaloUp = 0, reportedHaloDown = 0;
 #endif
 
   /*!
